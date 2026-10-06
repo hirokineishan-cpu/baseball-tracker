@@ -1,4 +1,4 @@
-/* フィジカル
+/* 計測（フィジカル）
    入力   ：測定日と種目を選んで、選手をまとめて記録する（管理・スタッフ）
    種目別 ：1つの種目について、全員を並べて見る（管理・スタッフ）
    選手別 ：1人について、全種目の今と推移を見る。選手がログインしたときは、自分のこのページだけが出る
@@ -42,6 +42,12 @@ const CSS = `
 #tab-physical .in{ width:5.4em; text-align:right; font-family:var(--num); font-size:16px; padding:6px 7px }
 #tab-physical .in.dirty{ border-color:var(--gold); box-shadow:0 0 0 2px color-mix(in srgb, var(--gold) 35%, transparent) }
 #tab-physical .in.has{ background:var(--raise) }
+#tab-physical .in.clash{ border-color:var(--clay); box-shadow:0 0 0 2px color-mix(in srgb, var(--clay) 30%, transparent) }
+#tab-physical td.n .other{ display:block; font-family:var(--jp); font-size:10.5px; color:var(--clay); margin:2px 0 0; white-space:nowrap }
+#tab-physical .cf{ border-color:var(--clay) }
+#tab-physical .cf table td{ white-space:normal }
+#tab-physical .cf .btns{ display:flex; gap:6px; flex-wrap:wrap }
+#tab-physical .live{ font-size:11px; color:var(--muted) }
 #tab-physical .gauge{ position:relative; height:10px; background:var(--ground); border-radius:5px; overflow:hidden; min-width:90px }
 #tab-physical .gauge i{ position:absolute; left:0; top:0; bottom:0; background:var(--accent); border-radius:5px }
 #tab-physical td.g{ width:30%; min-width:120px }
@@ -89,7 +95,7 @@ const CSS = `
 const pad2 = n => String(n).padStart(2, '0');
 const today = () => { const d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); };
 const num = (v, dec) => (v == null || v === '' || isNaN(v)) ? '—' : Number(v).toFixed(dec);
-const NOCLASS = '\u0001none';
+const NOCLASS = '\u0001none', RESTING = '\u0001rest', LEFT = '\u0001left';
 
 /* 学年（4月2日〜翌4月1日生まれが同じ学年）。生年月日が無ければ空 */
 export function schoolGrade(birth, now) {
@@ -104,8 +110,16 @@ export function schoolGrade(birth, now) {
   return '';
 }
 
+/* 月齢（生まれてから何か月か）。生年月日が無ければ null */
+export function monthsOld(birth, now) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(birth || '')); if (!m) return null;
+  const t = now || new Date();
+  const n = (t.getFullYear() - Number(m[1])) * 12 + (t.getMonth() + 1 - Number(m[2])) - (t.getDate() < Number(m[3]) ? 1 : 0);
+  return n >= 0 ? n : null;
+}
+
 /* 算出項目：ここに書いてある分だけを、同じ日に測った値から計算する */
-const DERIVED = {
+export const DERIVED = {
   'm-lmi':  { need: ['m-lbm', 'm-height'],     calc: v => (v['m-lbm'] && v['m-height']) ? v['m-lbm'] / Math.pow(v['m-height'] / 100, 2) : null },
   'm-bmi':  { need: ['m-weight', 'm-height'],  calc: v => (v['m-weight'] && v['m-height']) ? v['m-weight'] / Math.pow(v['m-height'] / 100, 2) : null },
   'm-erir': { need: ['m-hhd-er', 'm-hhd-ir'],  calc: v => (v['m-hhd-er'] && v['m-hhd-ir']) ? v['m-hhd-er'] / v['m-hhd-ir'] * 100 : null }
@@ -165,20 +179,24 @@ export function mount(ROOT, CORE) {
   const $ = s => ROOT.querySelector(s);
   /* 選手がログインしているとき：自分の記録だけを受け取り、「選手別」の自分のページだけを出す */
   const SELF = CORE.role() === '選手';
-  const CACHE = SELF ? 'ph-me' : 'ph';
-
   let view = SELF ? 'player' : (['in', 'item', 'player'].indexOf(store.get('ph-view')) >= 0 ? store.get('ph-view') : 'in');
   let ITEMS = [], NROWS = 0, IDX = new Map(), CELL = new Map(), ALL = [], PLAYERS = [];
   let selItem = '', selItem2 = '', selPlayer = '', selDate = today(), selClass = '';
-  let draft = {};            // 入力中の値  key: 選手ID|項目ID|側|測定日
-  let loaded = false, busy = false, msg = '', msgOk = false, loadedAt = 0;
+  /* 入力中の値は端末に控える（画面を閉じても、電波が切れても残る）。key: 選手ID|項目ID|側|測定日
+     base は、打ち始めたときに見えていた値。保存のとき一緒に送り、その間にほかの人が入れていたら、サーバーが止める。 */
+  const kept = (!SELF && store.get('ph-draft')) || {};
+  let draft = kept.draft || {}, base = kept.base || {};
+  let conflicts = [];        // 保存のとき、ほかの人の入力とぶつかったマス
+  let loaded = false, busy = false, msg = '', msgOk = false, pending = false;
+  const D = CORE.data.state;
+  const keepDraft = () => { if (!SELF) store.set('ph-draft', { draft, base }); };
 
   /* ---- 受け取ったものを使える形にする ---- */
   function applyPlayers(list) {
     ALL = (list || []).slice();
-    PLAYERS = ALL.filter(x => !String(x['状態'] || ''))
-      .sort((a, b) => (Number(a['順']) || 0) - (Number(b['順']) || 0) || String(a['かな'] || a['氏名']).localeCompare(String(b['かな'] || b['氏名']), 'ja'));
-    if (!PLAYERS.some(p => String(p['選手ID']) === selPlayer)) selPlayer = PLAYERS.length ? String(PLAYERS[0]['選手ID']) : '';
+    ALL.sort((a, b) => (Number(a['順']) || 0) - (Number(b['順']) || 0) || String(a['かな'] || a['氏名']).localeCompare(String(b['かな'] || b['氏名']), 'ja'));
+    PLAYERS = ALL.filter(x => !String(x['状態'] || ''));
+    if (!ALL.some(p => String(p['選手ID']) === selPlayer)) selPlayer = PLAYERS.length ? String(PLAYERS[0]['選手ID']) : '';
     if (selClass && !classes().some(c => c.v === selClass)) selClass = '';
   }
   function applyPhys(p) {
@@ -195,39 +213,35 @@ export function mount(ROOT, CORE) {
     if (!measured.some(i => String(i['項目ID']) === selItem)) selItem = measured.length ? String(measured[0]['項目ID']) : '';
     if (!ITEMS.some(i => String(i['項目ID']) === selItem2)) selItem2 = selItem;
   }
-  function applySelf(me) {
-    if (!me || !me.pid) return;
-    applyPlayers([{ '選手ID': me.pid, '氏名': me.name, '投': me.hand || '', '状態': '', '順': 0 }]);
-    selPlayer = String(me.pid);
+  /* みんなで使うデータ（外枠が1回で取ってくる）から、この画面用の索引を作り直す */
+  function pull() {
+    if (!D.ready) return;
+    applyPlayers(D.players);
+    applyPhys({ items: D.items, rows: CORE.data.rows() });
+    if (SELF && D.me) selPlayer = String(D.me.pid);
+    loaded = true;
   }
-  function warmStart() {      // 通信を待たずに、まず前回の内容を出す
-    const c = store.get(CACHE); if (!c || !c.items) return;
-    if (SELF) { if (!c.me) return; applySelf(c.me); } else { if (!c.players) return; applyPlayers(c.players); }
-    applyPhys(c); loaded = true;
-  }
-  async function load() {
+  const typing = () => { const a = document.activeElement; return !!a && ROOT.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName) && !ROOT.hidden; };
+  /* ほかの人の入力が届いたとき。打っている最中は画面を作り直さず、手が離れてから反映する */
+  CORE.data.on(changed => {
+    const was = loaded;
+    if (changed || !was) pull();
+    if (!changed && was) { const l = $('#ph-live'); if (l) l.textContent = liveText(); return; }
+    if (typing()) { pending = true; return; }
+    render();
+  });
+  ROOT.addEventListener('focusout', () => { if (pending) setTimeout(() => { if (pending && !typing()) { pending = false; render(); } }, 60); });
+  async function load(full) {
     if (busy) return;
     busy = true; if (!loaded) render();
-    try {
-      let pack;
-      if (SELF) {
-        const p = await api('getMyPhysical');
-        if (!p.ok) throw new Error(p.error || 'フィジカルのデータを取れませんでした');
-        applySelf(p.me); applyPhys(p);
-        pack = { items: p.items, rows: p.rows, me: p.me };
-      } else {
-        const [m, p] = await Promise.all([api('getMaster'), api('getPhysical')]);
-        if (!m.ok) throw new Error(m.error || '選手名簿を取れませんでした');
-        if (!p.ok) throw new Error(p.error || 'フィジカルのデータを取れませんでした');
-        applyPlayers(m.master.players); applyPhys(p);
-        pack = { items: p.items, rows: p.rows, players: m.master.players };
-      }
-      store.set(CACHE, pack);
-      loaded = true; loadedAt = Date.now();
-      if (!msgOk) msg = '';
-    } catch (e) { msg = String(e.message || e); msgOk = false; }
-    busy = false; render();
+    const j = await CORE.data.refresh(!!full);
+    busy = false;
+    if (j && j.ok) { if (!msgOk) msg = ''; }
+    else if (j && j.error && !j.mustChange) { msg = j.error; msgOk = false; }
+    else if (D.error) { msg = D.error; msgOk = false; }
+    pull(); render();
   }
+  const liveText = () => { if (!D.at) return ''; const t = new Date(D.at); return pad2(t.getHours()) + ':' + pad2(t.getMinutes()) + ' 時点'; };
 
   /* ---- 取り出し ---- */
   const item = id => ITEMS.find(i => String(i['項目ID']) === String(id));
@@ -270,14 +284,23 @@ export function mount(ROOT, CORE) {
   }
   const sub = p => { const g = schoolGrade(p['生年月日']), c = String(p['クラス'] || ''); return [g, c].filter(Boolean).join(' ／ '); };
   function classes() {
-    const names = []; let none = false;
-    PLAYERS.forEach(p => { const c = String(p['クラス'] || ''); if (!c) none = true; else if (names.indexOf(c) < 0) names.push(c); });
-    if (!names.length) return [];
+    const names = []; let none = false, rest = false, left = false;
+    ALL.forEach(p => { const s = String(p['状態'] || ''), c = String(p['クラス'] || '');
+      if (s === '退会') { left = true; return; } if (s) { rest = true; return; }
+      if (!c) none = true; else if (names.indexOf(c) < 0) names.push(c); });
     const out = names.sort((a, b) => a.localeCompare(b, 'ja')).map(c => ({ v: c, l: c }));
-    if (none) out.push({ v: NOCLASS, l: '（クラスなし）' });
+    if (none && names.length) out.push({ v: NOCLASS, l: '（クラスなし）' });
+    if (SELF) return out;
+    if (rest) out.push({ v: RESTING, l: '休会' });
+    if (left) out.push({ v: LEFT, l: '退会者' });
     return out;
   }
-  const shown = () => !selClass ? PLAYERS : PLAYERS.filter(p => selClass === NOCLASS ? !String(p['クラス'] || '') : String(p['クラス'] || '') === selClass);
+  function shown() {
+    if (!selClass) return PLAYERS;
+    if (selClass === LEFT) return ALL.filter(p => String(p['状態'] || '') === '退会');
+    if (selClass === RESTING) return ALL.filter(p => { const s = String(p['状態'] || ''); return s && s !== '退会'; });
+    return PLAYERS.filter(p => selClass === NOCLASS ? !String(p['クラス'] || '') : String(p['クラス'] || '') === selClass);
+  }
 
   /* ---- 選ぶ欄 ---- */
   function itemSelect(id, sel, measuredOnly) {
@@ -288,7 +311,7 @@ export function mount(ROOT, CORE) {
   }
   function classSelect() {
     const cs = classes(); if (!cs.length) return '';
-    return `<label class="f">クラス<select id="ph-class"><option value="">すべて</option>${cs.map(c => `<option value="${esc(c.v)}"${c.v === selClass ? ' selected' : ''}>${esc(c.l)}</option>`).join('')}</select></label>`;
+    return `<label class="f">クラス<select id="ph-class"><option value="">在籍の全員</option>${cs.map(c => `<option value="${esc(c.v)}"${c.v === selClass ? ' selected' : ''}>${esc(c.l)}</option>`).join('')}</select></label>`;
   }
   function itemNote(it) {
     const bits = [], t = String(it['基準の型'] || 'なし');
@@ -316,8 +339,9 @@ export function mount(ROOT, CORE) {
         const ck = pid + '|' + selItem + '|' + sd, k = ck + '|' + selDate;
         const saved = CELL.get(k);
         const v = (k in draft) ? draft[k] : (saved != null ? saved : '');
-        const cls = (k in draft) ? 'in dirty' : (saved != null ? 'in has' : 'in');
-        return `<td class="n"><input class="${cls}" type="number" inputmode="decimal" step="any" data-k="${esc(k)}" value="${esc(v)}" aria-label="${esc(p['氏名'])} ${sd}"></td>`;
+        const clash = (k in draft) && String(saved != null ? saved : '') !== String(base[k] != null ? base[k] : '');     // 打っている間に、ほかの人が入れた
+        const cls = (k in draft) ? 'in dirty' + (clash ? ' clash' : '') : (saved != null ? 'in has' : 'in');
+        return `<td class="n"><input class="${cls}" type="number" inputmode="decimal" step="any" data-k="${esc(k)}" value="${esc(v)}" aria-label="${esc(p['氏名'])} ${sd}">${clash ? `<small class="other">ほかの人が ${saved != null ? esc(saved) : '消去'}</small>` : ''}</td>`;
       }).join('');
       const pv = ss.map(sd => { const h = hist(pid, selItem, sd).filter(x => x.d !== selDate); return h.length ? h[h.length - 1] : null; });
       const hint = pv.some(Boolean)
@@ -339,11 +363,23 @@ export function mount(ROOT, CORE) {
         <button class="b primary" id="ph-save" ${n ? '' : 'disabled'}>保存</button>
       </div>
     </div>
+    ${conflictCard()}
     ${itemNote(it)}
-    <p class="note">数字を消して保存すると、その記録を消します。日付や種目を切り替えても、未保存の入力は残ります。</p>
+    <p class="note">数字を消して保存すると、その記録を消します。未保存の入力は、日付や種目を切り替えても、画面を閉じても残ります。ほかの人の入力は、自動で届きます。</p>
     <div class="card"><div class="tw"><table id="ph-intable">
       <tr><th>選手（${list.length}人）</th>${head}<th class="hide-s">前回</th></tr>${rows || `<tr><td colspan="${ss.length + 2}" class="muted">選手がいません（管理の「選手名簿」で登録してください）</td></tr>`}
     </table></div></div>`;
+  }
+
+  function conflictCard() {
+    if (!conflicts.length) return '';
+    const rows = conflicts.map((c, i) => { const p = player(c['選手ID']), it = item(c['項目ID']);
+      return `<tr><td class="nm">${esc(p ? p['氏名'] : c['選手ID'])}<small>${esc(it ? it['項目名'] : c['項目ID'])}${c['側'] ? ' ' + esc(c['側']) : ''}　${esc(c['測定日'])}</small></td>
+        <td class="n">${c['今の値'] === '' ? '消去' : esc(c['今の値'])}<small class="muted" style="display:block;font-family:var(--jp)">${esc(c['入れた人'] || 'ほかの人')}</small></td>
+        <td class="n">${c['あなたの値'] === '' ? '消去' : esc(c['あなたの値'])}</td>
+        <td><div class="btns"><button class="b" data-cf-keep="${i}">相手の値を残す</button><button class="b primary" data-cf-mine="${i}">自分の値にする</button></div></td></tr>`; }).join('');
+    return `<div class="card cf" id="ph-cf"><h3>ほかの人の入力と重なりました（${conflicts.length}件）<span class="u">まだ保存していません。どちらを残すか選んでください</span></h3>
+      <div class="tw"><table><tr><th>選手・種目</th><th class="n">今入っている値</th><th class="n">あなたの値</th><th></th></tr>${rows}</table></div></div>`;
   }
 
   /* ================= 画面：種目別 ================= */
@@ -468,10 +504,11 @@ export function mount(ROOT, CORE) {
       : (view === 'in' ? viewInput() : view === 'item' ? viewItem() : viewPlayer());
     ROOT.innerHTML = `<div class="pw">
       <div class="hd">
-        <h2>フィジカル</h2>
+        <h2>計測</h2>
         <span class="sub">${!loaded ? '' : SELF ? `記録 ${NROWS}件` : `選手 ${PLAYERS.length}人・記録 ${NROWS}件`}</span>
         <div class="sp">
           ${tabs.length ? `<div class="seg">${tabs.map(([k, n]) => `<button data-v="${k}" aria-pressed="${view === k}">${n}</button>`).join('')}</div>` : ''}
+          <span class="live" id="ph-live">${esc(liveText())}</span>
           <button class="b" id="ph-refresh">最新にする</button>
           ${SELF && loaded ? '<button class="b" id="ph-print">印刷・PDFで保存</button>' : ''}
         </div>
@@ -487,8 +524,16 @@ export function mount(ROOT, CORE) {
     if (v) { if (!SELF) { view = v.dataset.v; store.set('ph-view', view); } render(); window.scrollTo(0, 0); return; }
     const g = e.target.closest('[data-goto]');
     if (g) { e.preventDefault(); selPlayer = g.dataset.goto; view = 'player'; render(); window.scrollTo(0, 0); return; }
-    if (e.target.id === 'ph-reload' || e.target.id === 'ph-refresh') { msg = ''; load(); return; }
-    if (e.target.id === 'ph-clear') { draft = {}; msg = ''; render(); return; }
+    if (e.target.id === 'ph-reload' || e.target.id === 'ph-refresh') { msg = ''; load(true); return; }
+    if (e.target.id === 'ph-clear') { draft = {}; base = {}; conflicts = []; keepDraft(); msg = ''; render(); return; }
+    const ck = e.target.closest('[data-cf-keep]'), cm = e.target.closest('[data-cf-mine]');
+    if (ck || cm) {
+      const c = conflicts[Number((ck || cm).dataset[ck ? 'cfKeep' : 'cfMine'])]; if (!c) return;
+      const k = [c['選手ID'], c['項目ID'], c['側'], c['測定日']].join('|');
+      conflicts = conflicts.filter(x => x !== c);
+      if (ck) { delete draft[k]; delete base[k]; keepDraft(); render(); return; }
+      await save([k], true); return;
+    }
     if (e.target.id === 'ph-print') { window.print(); return; }
     if (e.target.id === 'ph-save') { if (!SELF) await save(); return; }
   });
@@ -503,37 +548,59 @@ export function mount(ROOT, CORE) {
   ROOT.addEventListener('input', e => {
     const k = e.target.dataset && e.target.dataset.k; if (!k) return;
     const saved = CELL.get(k), val = e.target.value.trim();
-    if (val === (saved != null ? String(saved) : '')) { delete draft[k]; e.target.classList.remove('dirty'); }   // 元に戻したら、未保存から外す
+    if (!(k in draft)) base[k] = saved != null ? saved : '';                    // 打ち始めたときに見えていた値
+    if (val === String(base[k])) { delete draft[k]; delete base[k]; e.target.classList.remove('dirty'); }   // 元に戻したら、未保存から外す
     else { draft[k] = val; e.target.classList.add('dirty'); }
+    keepDraft();
     const n = draftCount(), s = $('#ph-save'), c = $('#ph-clear'), l = $('#ph-n');
     if (s) s.disabled = !n; if (c) c.disabled = !n; if (l) l.textContent = n ? '未保存 ' + n + '件' : '';
   });
-  window.addEventListener('beforeunload', e => { if (draftCount()) { e.preventDefault(); e.returnValue = ''; } });
 
-  async function save() {
+  /* 保存：変えたマスだけを送る。keys を渡すと、そのマスだけ。force は「自分の値にする」を選んだとき */
+  async function save(keys, force) {
     if (busy) return;
-    const rows = [], now = Date.now(); let bad = 0;
-    Object.keys(draft).forEach(k => {
+    const rows = [], sent = []; let bad = 0;
+    (keys || Object.keys(draft)).forEach(k => {
+      if (!(k in draft)) return;
       const [pid, iid, sd, d] = k.split('|'), raw = draft[k];
       if (raw !== '' && !isFinite(Number(raw))) { bad++; return; }
-      rows.push({ '選手ID': pid, '測定日': d, '項目ID': iid, '側': sd, '値': raw === '' ? '' : Number(raw), '更新日時': now });
+      const o = { '選手ID': pid, '測定日': d, '項目ID': iid, '側': sd, '値': raw === '' ? '' : Number(raw), '元': base[k] != null ? base[k] : '' };
+      if (force) o['上書き'] = 1;
+      rows.push(o); sent.push(k);
     });
     if (bad) { msg = '数字として読めない入力が ' + bad + '件あります。直してから保存してください'; msgOk = false; render(); return; }
+    if (!rows.length) { render(); return; }
     const btn = $('#ph-save'); if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
     busy = true;
     try {
       const j = await api('upsertMeasures', { rows });
       if (!j.ok) throw new Error(j.error || '保存できませんでした');
-      draft = {}; busy = false;
-      msg = `保存しました（追加${j.added || 0}・更新${j.updated || 0}${j.removed ? '・削除' + j.removed : ''}${j.skipped ? '・受け付けなかったもの' + j.skipped : ''}）`; msgOk = !j.skipped;
-      await load();
+      const cf = j.conflicts || [], cfKey = {};
+      cf.forEach(c => { cfKey[[c['選手ID'], c['項目ID'], c['側'], c['測定日']].join('|')] = c; });
+      const done = [], seen = [];
+      sent.forEach(k => {
+        const a = k.split('|');
+        if (cfKey[k]) { seen.push([a[0], a[3], a[1], a[2], cfKey[k]['今の値']]); return; }       // ぶつかったマスは、未保存のまま残す
+        done.push([a[0], a[3], a[1], a[2], draft[k]]); delete draft[k]; delete base[k];
+      });
+      if (!keys) conflicts = cf; else conflicts = conflicts.concat(cf);
+      keepDraft(); busy = false;
+      const bits = [`追加${j.added || 0}`, `更新${j.updated || 0}`];
+      if (j.removed) bits.push('削除' + j.removed);
+      if (j.skipped) bits.push('受け付けなかったもの' + j.skipped);
+      msg = cf.length ? `ほかの人の入力と重なったマスが ${cf.length}件あります。下で、どちらを残すか選んでください（ほかは保存しました：${bits.join('・')}）`
+                      : `保存しました（${bits.join('・')}）`;
+      msgOk = !j.skipped && !cf.length;
+      CORE.data.put(done.concat(seen));          // 手元にすぐ反映（このあと、変わった分をサーバーに確かめる）
+      pull(); render();
+      CORE.data.refresh(false);
       setTimeout(() => { if (msgOk) { msg = ''; msgOk = false; const m = $('#ph-msg'); if (m) m.remove(); } }, 5000);
-    } catch (e) { msg = String(e.message || e); msgOk = false; busy = false; render(); }
+    } catch (e) { msg = String(e.message || e) + '（入力は残っています。電波の届くところで、もう一度「保存」を押してください）'; msgOk = false; busy = false; render(); }
   }
 
-  /* タブを開き直したとき、5分以上たっていれば取り直す（入力の途中では取り直さない） */
-  ROOT.addEventListener('bt:show', () => { if (!busy && (!loaded || (Date.now() - loadedAt > 5 * 60000 && !draftCount()))) load(); });
-  warmStart();
+  /* タブを開き直したとき、1分以上たっていれば「変わった分」を確かめる */
+  ROOT.addEventListener('bt:show', () => { if (!busy && (!loaded || Date.now() - D.at > 60000)) load(false); });
+  pull();
   render();
-  load();
+  if (!loaded) { busy = true; render(); CORE.session.then(() => { busy = false; pull(); if (!loaded && D.error) msg = D.error; render(); }); }
 }

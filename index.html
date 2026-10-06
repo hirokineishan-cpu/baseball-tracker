@@ -50,6 +50,8 @@ button, input, select, textarea{ font:inherit; color:inherit }
   font-size:14px; font-weight:600; letter-spacing:.03em; padding:0 20px; cursor:pointer; position:relative; opacity:.66;
   border-radius:0; white-space:nowrap;
 }
+#bar button .sm{ display:none }
+#bar button.dot::after{ content:''; display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--gold); margin-left:5px; vertical-align:middle }
 #bar button:hover{ opacity:.88 }
 #bar button[aria-selected="true"]{ opacity:1 }
 #bar button[aria-selected="true"]::after{ content:""; position:absolute; left:10%; right:10%; bottom:0; height:3px; background:var(--gold); border-radius:3px 3px 0 0 }
@@ -69,6 +71,13 @@ main{ padding-top:calc(var(--barH) + env(safe-area-inset-top)) }
   #bar button{ flex:1; padding:0 4px; font-size:13px; letter-spacing:0 }
 }
 @media (max-width:370px){ #bar.multi .tt{ display:none } }
+/* タブが多いとき（管理・スタッフ）：スマホではシステム名を隠し、長い名前は短くする */
+@media (max-width:560px){
+  #bar.many .tt{ display:none }
+  #bar.many button{ font-size:12.5px; padding:0 2px }
+  #bar.many button .lg{ display:none } #bar.many button .sm{ display:inline }
+}
+@media (min-width:561px) and (max-width:900px){ #bar.many button{ padding:0 11px } }
 @media (max-height:520px) and (orientation:landscape){ :root{ --barH:34px } #bar button{ font-size:12.5px } }
 @media print{ #bar, #toast{ display:none !important } main{ padding-top:0 !important } }
 </style>
@@ -97,15 +106,17 @@ const CFG = {
 /* ---- 項目（機能）を足すときは、この2つの表に足す ----
    1) 部品の一覧：タブの名前と、部品のファイル */
 const PARTS = {
-  physical: { label:'フィジカル', file:'./mod-physical.js' },
-  admin: { label:'管理',       file:'./mod-admin.js' },
-  me:    { label:'マイページ', file:'./mod-me.js' }
+  physical: { label:'計測',           file:'./mod-physical.js?v=202610070331' },
+  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610070331' },
+  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610070331' },
+  admin:    { label:'管理',           file:'./mod-admin.js?v=202610070331' },
+  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610070331' }
 };
 /* 2) 立場ごとに出すタブ（左から順）。guest＝まだログインしていない */
 const TABS = {
-  '管理':     ['physical', 'admin', 'me'],
-  'スタッフ': ['physical', 'me'],
-  '選手':     ['physical', 'me'],
+  '管理':     ['physical', 'analysis', 'message', 'admin', 'me'],
+  'スタッフ': ['physical', 'analysis', 'message', 'me'],
+  '選手':     ['physical', 'me'],          /* 解析とメッセージ配信は、選手には出さない（サーバーも断る） */
   guest:      ['me']
 };
 
@@ -168,8 +179,67 @@ const CORE = { cfg:CFG, resetToken:RESET, api, conn, store, esc, toast, key, app
   tabs: () => tabsOf(mode).map(k => ({ key:k, label:PARTS[k].label })),
   barH: () => (document.getElementById('bar')?.offsetHeight || 0) };
 
-/* ログイン中なら、サーバーの返事（me）を部品にも渡す。まだなら null */
-CORE.session = conn().token ? api('me').catch(() => null) : Promise.resolve(null);
+/* ---- みんなで使うデータ（選手・測定項目・計測）----
+   開いたときの通信は1回だけ（sync）。前回の内容を端末に控えておき、次からは「変わった分だけ」を受け取る。
+   部品は CORE.data.state を読み、CORE.data.on で変化を知る。自分でサーバーへ取りに行かない。 */
+const DATA = { ready:false, players:[], items:[], cells:new Map(), me:null, messages:[], stamp:0, epoch:'', itRev:'', mRev:'', at:0, error:'', calls:0 };
+const dataListeners = new Set();
+const cellKey = r => r[0] + '|' + r[2] + '|' + (r[3] || '') + '|' + r[1];        // 選手ID|項目ID|側|測定日
+function rowsArray(){ const out = []; DATA.cells.forEach((v, k) => { const a = k.split('|'); out.push([a[0], a[3], a[1], a[2], v]); }); return out; }
+function saveData(){ store.set('data', { v:2, who:(conn().user || {}).id, players:DATA.players, items:DATA.items, rows:rowsArray(), me:DATA.me, messages:DATA.messages,
+  stamp:DATA.stamp, epoch:DATA.epoch, itRev:DATA.itRev, mRev:DATA.mRev }); }
+(function loadData(){
+  const c = store.get('data'), u = conn().user || {};
+  if (!c || c.v !== 2 || c.who !== u.id || !conn().token) return;          // ほかの人の控えは使わない
+  DATA.players = c.players || []; DATA.items = c.items || []; (c.rows || []).forEach(r => DATA.cells.set(cellKey(r), r[4]));
+  DATA.me = c.me || null; DATA.messages = c.messages || [];
+  DATA.stamp = c.stamp || 0; DATA.epoch = c.epoch || ''; DATA.itRev = c.itRev || ''; DATA.mRev = c.mRev || ''; DATA.ready = true;
+})();
+function applyData(j, isPlayer){
+  let changed = false;
+  if (j.players) { DATA.players = j.players; changed = true; }
+  if (j.items) { DATA.items = j.items; changed = true; }
+  if (isPlayer) {
+    DATA.me = j.me || null; DATA.messages = j.messages || [];
+    if (j.me) DATA.players = [{ '選手ID':j.me.pid, '氏名':j.me.name, '投':j.me.hand || '', '状態':'', '順':0 }];
+    DATA.cells = new Map(); (j.rows || []).forEach(r => { if (r[4] != null) DATA.cells.set(cellKey(r), r[4]); }); changed = true;
+  } else if (j.delta) {
+    (j.rows || []).forEach(r => { const k = cellKey(r);
+      if (r[4] == null) { if (DATA.cells.delete(k)) changed = true; }
+      else if (DATA.cells.get(k) !== r[4]) { DATA.cells.set(k, r[4]); changed = true; } });
+  } else if (!j.same) {
+    DATA.cells = new Map(); (j.rows || []).forEach(r => { if (r[4] != null) DATA.cells.set(cellKey(r), r[4]); }); changed = true;
+  }
+  if (j.stamp) DATA.stamp = j.stamp;
+  if (j.epoch != null) DATA.epoch = String(j.epoch);
+  if (j.itRev != null) DATA.itRev = String(j.itRev);
+  if (j.mRev != null) DATA.mRev = String(j.mRev);
+  DATA.ready = true; DATA.at = Date.now(); DATA.error = '';
+  if (changed) saveData();
+  return changed;
+}
+let inflight = null;
+function refresh(full){
+  if (inflight) return inflight;
+  if (!conn().token || modeNow() === 'guest') return Promise.resolve(null);
+  const isPlayer = CORE.role() === '選手';
+  const ask = (isPlayer || full || !DATA.ready) ? {} : { since:DATA.stamp, epoch:DATA.epoch, itRev:DATA.itRev, mRev:DATA.mRev };
+  inflight = (async () => {
+    let j = null;
+    try { DATA.calls++; j = await api('sync', ask); } catch (e) { DATA.error = String(e.message || e); return null; }
+    if (j && j.ok) { const ch = applyData(j, isPlayer); dataListeners.forEach(fn => { try { fn(ch); } catch (e) {} }); }
+    else if (j) DATA.error = j.error || '';
+    return j;
+  })().finally(() => { inflight = null; });
+  return inflight;
+}
+CORE.data = { state:DATA, refresh, rows:rowsArray,
+  on(fn){ dataListeners.add(fn); },
+  /* 保存がうまくいったマスを、取り直しを待たずに手元へ反映する */
+  put(list){ list.forEach(r => { const k = cellKey(r); if (r[4] == null || r[4] === '') DATA.cells.delete(k); else DATA.cells.set(k, Number(r[4])); }); saveData(); dataListeners.forEach(fn => { try { fn(true); } catch (e) {} }); } };
+
+/* ログイン中なら、開いたときに1回だけサーバーへ取りに行く。その返事（立場・名前も入っている）を部品にも渡す。まだなら null */
+CORE.session = refresh(false);
 
 const mode = modeNow();
 const vis = tabsOf(mode);
@@ -180,13 +250,15 @@ const main = document.getElementById('main');
 
 vis.forEach(k => {
   const b = document.createElement('button');
-  b.setAttribute('role', 'tab'); b.dataset.tab = k; b.textContent = PARTS[k].label; b.setAttribute('aria-selected', 'false');
+  b.setAttribute('role', 'tab'); b.dataset.tab = k; b.dataset.label = PARTS[k].label; b.setAttribute('aria-selected', 'false');
+  b.innerHTML = '<span class="lg">' + esc(PARTS[k].label) + '</span><span class="sm" aria-hidden="true">' + esc(PARTS[k].short || PARTS[k].label) + '</span>';
   nav.appendChild(b);
   const s = document.createElement('section'); s.id = 'tab-' + k; s.hidden = true;
   main.insertBefore(s, boot);
 });
 nav.hidden = vis.length < 2;               // タブが1つだけのときは帯に出さない
 document.getElementById('bar').classList.toggle('multi', vis.length >= 2);
+document.getElementById('bar').classList.toggle('many', vis.length >= 4);
 
 async function show(k){
   if (vis.indexOf(k) < 0) k = vis[0];
@@ -226,8 +298,18 @@ CORE.session.then(j => {
   c.user = { id:j.user.id, name:j.user.name, role:j.user.role }; c.must = !!j.user.must;
   if (j.me) c.me = j.me;
   store.set('conn', c);
-  if (modeNow() !== before) location.reload();
+  if (modeNow() !== before) { location.reload(); return; }
+  /* 選手：まだ読んでいないお知らせがあれば、マイページのタブに印を付ける */
+  if (mode === '選手' && DATA.messages.length) { const seen = store.get('msg-seen') || [];
+    if (DATA.messages.some(m => seen.indexOf(m.id) < 0)) nav.querySelector('button[data-tab="me"]')?.classList.add('dot'); }
 });
+/* ほかの人の入力を受け取る：スタッフの画面は、見えている間、45秒ごとに「変わった分」だけを確かめる。
+   変わっていなければ、サーバーはシートを読まずにすぐ返す。 */
+const POLL_MS = 45000;
+if (mode === '管理' || mode === 'スタッフ') {
+  setInterval(() => { if (document.visibilityState === 'visible') refresh(false); }, POLL_MS);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Date.now() - DATA.at > 15000) refresh(false); });
+}
 /* 開いたまま選手用のリンク（#me）に切り替わったとき */
 window.addEventListener('hashchange', () => { if (location.hash === '#me') show('me'); });
 /* ほかのタブでログイン・ログアウトしたとき */

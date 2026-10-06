@@ -1,9 +1,9 @@
-import { schoolGrade } from './mod-physical.js';
+import { schoolGrade, monthsOld } from './mod-physical.js?v=202610070331';
 
 /* 管理（管理者だけ）
    ・ユーザー：追加、立場の変更、選手との結び付け、停止、パスワードの入れ直し
    ・選手のログインを許可するスイッチ
-   ・選手名簿：追加と変更
+   ・選手名簿：追加と変更、さがす（クラス・学年・月齢など）、選んだ選手をまとめて変える
    ・測定項目：フィジカルの種目の追加と変更
    どの操作も、サーバー側で「管理者か」を確かめている。 */
 
@@ -52,12 +52,26 @@ const CSS = `
 #tab-admin .chk{ display:flex; gap:8px; align-items:center; font-size:14px; color:var(--ink) }
 #tab-admin .chk input{ width:18px; height:18px; accent-color:var(--accent) }
 #tab-admin .acts{ display:flex; gap:8px; justify-content:flex-end; margin-top:4px }
-@media (max-width:420px){ #tab-admin .two{ grid-template-columns:1fr } }
+#tab-admin .flt{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px 10px; margin-bottom:8px }
+#tab-admin .flt .wide{ grid-column:span 2 }
+#tab-admin .mrange{ display:flex; align-items:center; gap:4px } #tab-admin .mrange input{ padding:9px 6px }
+#tab-admin .togs{ display:flex; gap:14px; flex-wrap:wrap; margin:2px 0 10px }
+#tab-admin .pr{ display:flex; align-items:stretch }
+#tab-admin .pr .ck{ flex:0 0 auto; display:flex; align-items:center; padding:0 10px 0 4px; cursor:pointer }
+#tab-admin .pr .ck input, #tab-admin .selall input{ width:20px; height:20px; accent-color:var(--accent) }
+#tab-admin .pr.on{ background:color-mix(in srgb, var(--gold) 13%, transparent) }
+#tab-admin .selall{ display:flex; gap:10px; align-items:center; font-size:13px; padding:8px 4px; cursor:pointer }
+#tab-admin .bulk{ position:sticky; bottom:8px; z-index:15; border-color:var(--gold); box-shadow:0 6px 18px rgba(0,0,0,.18) }
+#tab-admin .bulk .line{ display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end }
+#tab-admin .bulk .line label.f{ flex:1 1 150px }
+@media (max-width:420px){ #tab-admin .two{ grid-template-columns:1fr } #tab-admin .flt .wide{ grid-column:auto } }
 `;
 
 const ROLES = ['管理', 'スタッフ', '選手'];
 const ROLE_NOTE = '管理＝すべて／スタッフ＝記録の入力と全員分の閲覧（ユーザー管理はできない）／選手＝結び付けた選手本人の分を見るだけ';
-const STATES = [['', '在籍'], ['休会', '休会'], ['退会', '退会']];
+const STATES = [['', '在籍'], ['休会', '休会'], ['退会', '退会者']];
+const F_ALL = '\u0001all', F_NONE = '\u0001none', F_REST = '\u0001rest', F_LEFT = '\u0001left', NEWCLASS = '\u0001new';
+const ageText = n => n == null ? '' : Math.floor(n / 12) + '歳' + (n % 12) + 'か月';
 
 export function mount(ROOT, CORE) {
   const st = document.createElement('style');
@@ -66,10 +80,15 @@ export function mount(ROOT, CORE) {
 
   let page = ['users', 'roster', 'items'].indexOf(store.get('admin-page')) >= 0 ? store.get('admin-page') : 'users';
   let items = [], editItem = null;
-  let editPid = '';
+  let editPid = '', editWas = null;
   let imp = { data: null, step: '', text: '' };
   let mailQuota = 0, inv = { step: '', text: '' };
-  let users = [], lite = [], players = [], playerLogin = false, loadErr = '', loading = true, q = '';
+  let users = [], lite = [], players = [], playerLogin = false, loadErr = '', loading = true;
+  let flt = { q: '', cls: '', grade: '', m1: '', m2: '', noMail: false, noBirth: false, sort: '順' };
+  const sel = new Set();
+  let bulk = { field: 'クラス', step: '', busy: false };
+  let itemsAt = 0, loadedAt = 0;
+  const D = CORE.data.state;
   const myId = () => String((CORE.conn().user || {}).id || '');
 
   ROOT.innerHTML = `<div class="wrap">
@@ -84,16 +103,26 @@ export function mount(ROOT, CORE) {
     if (!j || !j.ok) throw new Error((j && j.error) || 'うまくいきませんでした');
     return j;
   }
-  async function load() {
-    loading = true; loadErr = ''; render();
+  /* 選手と記録は、外枠がまとめて取ってくる分を使う。ここで取るのは、ユーザーの一覧だけ */
+  function pullPlayers() { players = (D.players || []).slice().sort(byOrder); const ids = new Set(players.map(p => String(p['選手ID']))); [...sel].forEach(i => { if (!ids.has(i)) sel.delete(i); }); }
+  async function load(full) {
+    loading = !loadedAt; loadErr = ''; if (loading) render();
     try {
-      const [u, m, ph] = await Promise.all([call('listUsers'), call('getMaster'), call('getPhysical', { all: true, itemsOnly: true })]);
-      items = (ph.items || []).slice().sort((a, b) => (Number(a['順']) || 0) - (Number(b['順']) || 0));
+      const [u] = await Promise.all([call('listUsers'), CORE.data.refresh(!!full)]);
       users = u.users || []; lite = u.players || []; playerLogin = !!u.playerLogin; mailQuota = Number(u.mailQuota) || 0;
-      players = (m.master.players || []).slice().sort(byOrder);
+      pullPlayers(); loadedAt = Date.now();
+      if (page === 'items') await loadItems(true);
     } catch (e) { loadErr = String(e.message || e); }
     loading = false; render();
   }
+  /* 測定項目（使っていないものも含む）は、そのページを開いたときにだけ取る */
+  async function loadItems(force) {
+    if (!force && itemsAt) return;
+    const ph = await call('getPhysical', { all: true, itemsOnly: true });
+    items = (ph.items || []).slice().sort((a, b) => (Number(a['順']) || 0) - (Number(b['順']) || 0)); itemsAt = Date.now();
+  }
+  const quiet = () => !dlg.open && !(document.activeElement && body.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName));
+  CORE.data.on(changed => { if (!changed || loading) return; pullPlayers(); if (page === 'roster' && quiet() && !bulk.busy && imp.step !== 'run') render(); });
   const byOrder = (a, b) => (Number(a['順']) || 0) - (Number(b['順']) || 0) || String(a['かな'] || a['氏名']).localeCompare(String(b['かな'] || b['氏名']), 'ja');
   const pname = pid => { const p = lite.find(x => x.id === pid); return p ? p.name : ''; };
 
@@ -216,17 +245,106 @@ export function mount(ROOT, CORE) {
   }
 
   /* ---------------- 選手名簿 ---------------- */
+  const stateOf = p => String(p['状態'] || '');
+  const classList = () => [...new Set(players.map(x => String(x['クラス'] || '')).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ja'));
+  function filtered() {
+    const kw = flt.q.trim().toLowerCase(), m1 = flt.m1 === '' ? null : Number(flt.m1), m2 = flt.m2 === '' ? null : Number(flt.m2);
+    const out = players.filter(p => {
+      const st8 = stateOf(p), c = String(p['クラス'] || '');
+      if (flt.cls === '') { if (st8) return false; }
+      else if (flt.cls === F_LEFT) { if (st8 !== '退会') return false; }
+      else if (flt.cls === F_REST) { if (!st8 || st8 === '退会') return false; }
+      else if (flt.cls === F_NONE) { if (st8 || c) return false; }
+      else if (flt.cls !== F_ALL) { if (st8 || c !== flt.cls) return false; }
+      if (kw && (String(p['氏名']) + ' ' + String(p['かな'] || '') + ' ' + String(p['選手ID'])).toLowerCase().indexOf(kw) < 0) return false;
+      if (flt.grade && schoolGrade(p['生年月日']) !== flt.grade) return false;
+      if (m1 != null || m2 != null) { const n = monthsOld(p['生年月日']); if (n == null || (m1 != null && n < m1) || (m2 != null && n > m2)) return false; }
+      if (flt.noMail && p['メール']) return false;
+      if (flt.noBirth && p['生年月日']) return false;
+      return true;
+    });
+    const mo = p => { const n = monthsOld(p['生年月日']); return n == null ? Infinity : n; };
+    if (flt.sort === 'かな') out.sort((a, b) => String(a['かな'] || a['氏名']).localeCompare(String(b['かな'] || b['氏名']), 'ja'));
+    else if (flt.sort === '若い順') out.sort((a, b) => mo(a) - mo(b) || byOrder(a, b));
+    else if (flt.sort === '上から') out.sort((a, b) => (mo(b) === Infinity ? -1 : mo(b)) - (mo(a) === Infinity ? -1 : mo(a)) || byOrder(a, b));
+    else if (flt.sort === 'クラス') out.sort((a, b) => String(a['クラス'] || '\uffff').localeCompare(String(b['クラス'] || '\uffff'), 'ja') || byOrder(a, b));
+    return out;
+  }
+  function listHtml() {
+    const shown = filtered(), allOn = shown.length > 0 && shown.every(p => sel.has(String(p['選手ID'])));
+    if (!shown.length) return `<p class="empty" id="ad-pempty">${players.length ? 'あてはまる選手がいません。' : 'まだ選手がいません。「選手を追加」から登録してください。'}</p>`;
+    return `<label class="selall"><input type="checkbox" id="ad-selall" ${allOn ? 'checked' : ''}> 表示している <b id="ad-shown">${shown.length}</b>人をすべて選ぶ<span class="count" id="ad-seln">${sel.size ? '（' + sel.size + '人を選択中）' : ''}</span></label>
+      <ul class="list" id="ad-plist">${shown.map(p => { const pid = String(p['選手ID']), n = monthsOld(p['生年月日']);
+        return `<li class="pr ${sel.has(pid) ? 'on' : ''}"><label class="ck"><input type="checkbox" data-sel="${esc(pid)}" ${sel.has(pid) ? 'checked' : ''} aria-label="${esc(p['氏名'])}を選ぶ"></label>
+          <button class="row ${stateOf(p) ? 'is-off' : ''}" data-pid="${esc(pid)}">
+          <span class="nm"><b>${esc(p['氏名'])}</b><span>${esc(p['かな'] || '')}${[schoolGrade(p['生年月日']), n == null ? '' : ageText(n) + '（' + n + 'か月）', p['クラス']].filter(Boolean).map(x => '　' + esc(x)).join('')}${(p['投'] || p['打']) ? '　' + (p['投'] ? esc(p['投']) + '投' : '') + (p['打'] ? esc(p['打']) + '打' : '') : ''}</span></span>
+          <span class="tags">${p['メール'] ? '' : '<span class="tag warn">メール未登録</span>'}${String(p['投手']) === '1' ? '<span class="tag">投手</span>' : ''}${stateOf(p) ? `<span class="tag off">${esc(stateOf(p) === '退会' ? '退会者' : stateOf(p))}</span>` : ''}</span>
+        </button></li>`; }).join('')}</ul>`;
+  }
+  /* 選んだ選手をまとめて変える */
+  const BULK = { 'クラス': 'クラス', '状態': '状態（在籍・休会・退会者）', '投手': '投手かどうか', '投': '投げる手', '打': '打席' };
+  function bulkValueHtml() {
+    const f = bulk.field;
+    if (f === 'クラス') return `<label class="f">どのクラスにするか<select id="ad-bv">${classList().map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+        <option value="${NEWCLASS}">新しいクラス名を入れる…</option><option value="${F_NONE}">クラスなしにする</option><option value="${F_LEFT}">退会者にする</option></select></label>
+        <label class="f" id="ad-bnewbox" ${classList().length ? 'hidden' : ''}>新しいクラス名<input type="text" id="ad-bnew" autocomplete="off"></label>`;
+    if (f === '状態') return `<label class="f">どれにするか<select id="ad-bv">${opt(STATES, '')}</select></label>`;
+    if (f === '投手') return `<label class="f">どちらにするか<select id="ad-bv"><option value="1">投手にする</option><option value="">投手から外す</option></select></label>`;
+    if (f === '投') return `<label class="f">どれにするか<select id="ad-bv">${opt([['右', '右'], ['左', '左'], ['', '—（消す）']], '右')}</select></label>`;
+    return `<label class="f">どれにするか<select id="ad-bv">${opt([['右', '右'], ['左', '左'], ['両', '両'], ['', '—（消す）']], '右')}</select></label>`;
+  }
+  function bulkHtml() {
+    if (!sel.size) return '';
+    if (bulk.step === 'ask') return `<div class="card bulk" id="ad-bulk"><p class="note" id="ad-bask" style="color:var(--ink); font-size:14px"><b>${sel.size}人</b>の ${esc(bulk.text)}。よろしいですか。</p>
+      <div style="display:flex; gap:8px; margin-top:8px"><button class="b primary" id="ad-bgo" ${bulk.busy ? 'disabled' : ''}>${bulk.busy ? '変えています…' : '変える'}</button><button class="b" id="ad-bno">やめる</button></div></div>`;
+    return `<div class="card bulk" id="ad-bulk"><div class="head" style="margin-bottom:6px"><h3>選んだ ${sel.size}人をまとめて変える</h3><button class="b" id="ad-bclear">選択をやめる</button></div>
+      <div class="line"><label class="f">変える項目<select id="ad-bf">${Object.keys(BULK).map(k => `<option value="${k}" ${k === bulk.field ? 'selected' : ''}>${BULK[k]}</option>`).join('')}</select></label>
+        ${bulkValueHtml()}<button class="b primary" id="ad-bnext">次へ</button></div>
+      <div class="msg" id="ad-bmsg">${esc(bulk.err || '')}</div></div>`;
+  }
+  function bulkPlan() {
+    const f = bulk.field, v = ROOT.querySelector('#ad-bv').value;
+    if (f === 'クラス') {
+      if (v === F_LEFT) return { set: { '状態': '退会' }, text: '状態を「退会者」に変えます（クラスの名前と記録は残ります）' };
+      if (v === F_NONE) return { set: { 'クラス': '' }, text: 'クラスを空にします' };
+      const name = v === NEWCLASS ? ROOT.querySelector('#ad-bnew').value.trim() : v;
+      if (!name) throw new Error('クラス名を入れてください');
+      return { set: { 'クラス': name }, text: `クラスを「${name}」に変えます` };
+    }
+    if (f === '状態') return { set: { '状態': v }, text: `状態を「${(STATES.find(x => x[0] === v) || ['', ''])[1]}」に変えます` };
+    if (f === '投手') return { set: { '投手': v }, text: v ? '「投手」の印を付けます' : '「投手」の印を外します' };
+    return { set: { [f]: v }, text: `${f === '投' ? '投げる手' : '打席'}を「${v || '—'}」に変えます` };
+  }
+  async function runBulk() {
+    bulk.busy = true; render();
+    try {
+      const j = await call('patchPlayers', { ids: [...sel], set: bulk.set });
+      toast(j.updated + '人を変えました' + (j.missing ? '（見つからなかった人 ' + j.missing + '人）' : ''));
+      sel.clear(); bulk = { field: bulk.field, step: '', busy: false };
+      await load();
+    } catch (e) { bulk = { field: bulk.field, step: '', busy: false, err: String(e.message || e) }; render(); }
+  }
   function rosterHtml() {
-    const kw = q.trim().toLowerCase();
-    const shown = players.filter(p => !kw || (String(p['氏名']) + ' ' + String(p['かな'] || '')).toLowerCase().indexOf(kw) >= 0);
+    const cs = classList(), grades = [];
+    players.forEach(p => { const g = schoolGrade(p['生年月日']); if (g && grades.indexOf(g) < 0) grades.push(g); });
+    const gOrder = g => '小中高'.indexOf(g[0]) * 10 + Number(g.slice(1));
+    grades.sort((a, b) => gOrder(a) - gOrder(b));
+    const active = players.filter(p => !stateOf(p)).length;
     return `<div class="card">
-        <div class="head"><h3>選手名簿<span class="count">${players.length}人${kw ? '（' + shown.length + '人を表示）' : ''}</span></h3><button class="b primary" id="ad-padd">選手を追加</button></div>
-        <label class="f" style="margin-bottom:10px">名前でさがす<input type="search" id="ad-q" value="${esc(q)}" autocomplete="off"></label>
-        ${shown.length ? `<ul class="list" id="ad-plist">${shown.map(p => `<li><button class="row ${p['状態'] ? 'is-off' : ''}" data-pid="${esc(p['選手ID'])}">
-          <span class="nm"><b>${esc(p['氏名'])}</b><span>${esc(p['かな'] || '')}${[schoolGrade(p['生年月日']), p['クラス']].filter(Boolean).map(x => '　' + esc(x)).join('')}${(p['投'] || p['打']) ? '　' + (p['投'] ? esc(p['投']) + '投' : '') + (p['打'] ? esc(p['打']) + '打' : '') : ''}</span></span>
-          <span class="tags">${p['メール'] ? '' : '<span class="tag warn">メール未登録</span>'}${String(p['投手']) === '1' ? '<span class="tag">投手</span>' : ''}${p['状態'] ? `<span class="tag off">${esc(p['状態'])}</span>` : ''}</span>
-        </button></li>`).join('')}</ul>` : `<p class="empty">${players.length ? 'あてはまる選手がいません。' : 'まだ選手がいません。「選手を追加」から登録してください。'}</p>`}
+        <div class="head"><h3>選手名簿<span class="count" id="ad-pcount">在籍 ${active}人 ／ 全部で ${players.length}人</span></h3><button class="b primary" id="ad-padd">選手を追加</button></div>
+        <div class="flt" id="ad-flt">
+          <label class="f wide">名前・かな・IDでさがす<input type="search" id="ad-q" value="${esc(flt.q)}" autocomplete="off"></label>
+          <label class="f">クラス<select id="ad-fcls">${opt([['', '在籍の全員'], ...cs.map(c => [c, c]), [F_NONE, '（クラスなし）'], [F_REST, '休会'], [F_LEFT, '退会者'], [F_ALL, 'すべて（退会者も含む）']], flt.cls)}</select></label>
+          <label class="f">学年<select id="ad-fgrade">${opt([['', 'すべて'], ...grades.map(g => [g, g])], flt.grade)}</select></label>
+          <label class="f">月齢（か月）<span class="mrange"><input type="number" id="ad-fm1" value="${esc(flt.m1)}" inputmode="numeric" min="0" placeholder="から" aria-label="月齢 から">〜<input type="number" id="ad-fm2" value="${esc(flt.m2)}" inputmode="numeric" min="0" placeholder="まで" aria-label="月齢 まで"></span></label>
+          <label class="f">並べ方<select id="ad-fsort">${opt([['順', '並び順'], ['かな', 'かな'], ['クラス', 'クラス'], ['若い順', '月齢の小さい順'], ['上から', '月齢の大きい順']], flt.sort)}</select></label>
+        </div>
+        <div class="togs"><label class="chk"><input type="checkbox" id="ad-fnomail" ${flt.noMail ? 'checked' : ''}> メール未登録だけ</label>
+          <label class="chk"><input type="checkbox" id="ad-fnobirth" ${flt.noBirth ? 'checked' : ''}> 生年月日なしだけ</label></div>
+        <p class="note" style="margin-bottom:6px">月齢は、12歳0か月なら 144。学年と月齢は、生年月日を入れた選手だけ出ます。左の四角で選ぶと、下に「まとめて変える」が出ます。</p>
+        <div id="ad-rl">${listHtml()}</div>
       </div>
+      <div id="ad-bulkbox">${bulkHtml()}</div>
       <div class="card" id="ad-impbox">
         <div class="head"><h3>ファイルから取り込む（旧システムからの引き継ぎ用）</h3></div>
         <p class="note">「引き継ぎデータ.json」を選ぶと、選手と記録をまとめて取り込みます。すでにある選手・記録は増えません。こちらで直した内容は、取り込み直しても上書きされません。</p>
@@ -237,6 +355,7 @@ export function mount(ROOT, CORE) {
         ${imp.step !== 'run' && imp.text ? `<p class="note" id="ad-impres" style="color:var(--ink)">${esc(imp.text)}</p>` : ''}
       </div>`;
   }
+  const redrawList = () => { const el = ROOT.querySelector('#ad-rl'); if (el) el.innerHTML = listHtml(); const b = ROOT.querySelector('#ad-bulkbox'); if (b) b.innerHTML = bulkHtml(); };
   /* ---- 引き継ぎデータの取り込み。ふだんの保存と同じ道（upsertMaster・upsertMeasures）を、小分けにして通す ---- */
   function readImport(file) {
     const fr = new FileReader();
@@ -268,21 +387,21 @@ export function mount(ROOT, CORE) {
       }
       imp = { data: null, step: '', text: `取り込みました。選手：追加 ${t.pa}人・すでにある ${t.ps}人 ／ 記録：追加 ${t.a}件・すでにある ${t.u}件・入れなかったもの ${t.s}件` };
     } catch (e) { imp = { data: null, step: '', text: '途中で止まりました：' + String(e.message || e) + '（もう一度取り込めば、続きから入ります）' }; }
-    await load();
+    await load(true);
   }
   const opt = (pairs, sel) => pairs.map(([v, l]) => `<option value="${esc(v)}" ${String(sel || '') === v ? 'selected' : ''}>${esc(l)}</option>`).join('');
   function openPlayer(p) {
     const isNew = !p;
     p = p || { '選手ID': '', '氏名': '', 'かな': '', '生年月日': '', 'クラス': '', '打': '', '投': '', '投手': '', '状態': '', '備考': '',
                '順': players.reduce((m, x) => Math.max(m, Number(x['順']) || 0), 0) + 1 };
-    form.dataset.kind = 'player'; form.dataset.mode = isNew ? 'new' : 'edit'; editPid = String(p['選手ID']);
+    form.dataset.kind = 'player'; form.dataset.mode = isNew ? 'new' : 'edit'; editPid = String(p['選手ID']); editWas = isNew ? null : Object.assign({}, p);
     form.innerHTML = `<h3>${isNew ? '選手を追加' : '選手の変更'}</h3>
       <div class="two"><label class="f">氏名<input type="text" name="氏名" value="${esc(p['氏名'])}" autocomplete="off"></label>
         <label class="f">かな<input type="text" name="かな" value="${esc(p['かな'])}" autocomplete="off"></label></div>
       <div class="two"><label class="f">投<select name="投">${opt([['', '—'], ['右', '右'], ['左', '左']], p['投'])}</select></label>
         <label class="f">打<select name="打">${opt([['', '—'], ['右', '右'], ['左', '左'], ['両', '両']], p['打'])}</select></label></div>
       <div class="two"><label class="f">生年月日（入れると学年が出ます）<input type="date" name="生年月日" value="${esc(p['生年月日'])}" min="1990-01-01" max="2100-12-31"></label>
-        <label class="f">クラス<input type="text" name="クラス" value="${esc(p['クラス'])}" list="ad-classes" autocomplete="off"><datalist id="ad-classes">${[...new Set(players.map(x => String(x['クラス'] || '')).filter(Boolean))].sort().map(c => `<option value="${esc(c)}">`).join('')}</datalist></label></div>
+        <label class="f">クラス<input type="text" name="クラス" value="${esc(p['クラス'])}" list="ad-classes" autocomplete="off"><datalist id="ad-classes">${classList().map(c => `<option value="${esc(c)}">`).join('')}</datalist></label></div>
       <div class="two"><label class="f">状態<select name="状態">${opt(STATES, p['状態'])}</select></label>
         <label class="f">並び順<input type="number" name="順" value="${esc(p['順'])}" inputmode="numeric"></label></div>
       <label class="chk"><input type="checkbox" name="投手" ${String(p['投手']) === '1' ? 'checked' : ''}> 投手</label>
@@ -300,9 +419,13 @@ export function mount(ROOT, CORE) {
     const row = { '選手ID': isNew ? newPid() : editPid, '氏名': name, 'かな': f['かな'].value.trim(), '生年月日': f['生年月日'].value, 'クラス': f['クラス'].value.trim(),
       '打': f['打'].value, '投': f['投'].value, '投手': f['投手'].checked ? '1' : '', '状態': f['状態'].value, '備考': f['備考'].value.trim(), 'メール': f['メール'].value.trim(),
       '更新日時': Date.now(), '順': f['順'].value === '' ? '' : Number(f['順'].value) };
-    const j = await call('upsertMaster', { master: { players: [row] } });
-    if (j.result && j.result.skipped) throw new Error('ほかの端末で先に直されていました。読み込み直してから、もう一度直してください');
-    toast(isNew ? '選手を追加しました' : '保存しました');
+    if (isNew) { await call('upsertMaster', { master: { players: [row] } }); toast('選手を追加しました'); return; }
+    /* 変更は、変えた欄だけを送る（ほかの人が同じ選手の別の欄を直していても、消さない） */
+    const set = {};
+    ['氏名', 'かな', '生年月日', 'クラス', '打', '投', '投手', '状態', '備考', '順', 'メール'].forEach(k => { if (String(row[k] == null ? '' : row[k]) !== String(editWas[k] == null ? '' : editWas[k])) set[k] = row[k]; });
+    if (!Object.keys(set).length) { toast('変更はありません'); return; }
+    await call('patchPlayers', { ids: [editPid], set });
+    toast('保存しました');
   }
 
   /* ---------------- 測定項目 ---------------- */
@@ -369,7 +492,14 @@ export function mount(ROOT, CORE) {
   /* ---------------- 操作 ---------------- */
   ROOT.addEventListener('click', e => {
     const t = e.target;
-    const seg = t.closest('.seg button'); if (seg) { page = seg.dataset.page; store.set('admin-page', page); render(); return; }
+    const seg = t.closest('.seg button');
+    if (seg) { page = seg.dataset.page; store.set('admin-page', page); render();
+      if (page === 'items' && !itemsAt && !loading) loadItems().then(render, er => { loadErr = String(er.message || er); render(); });
+      return; }
+    if (t.id === 'ad-bclear') { sel.clear(); bulk.step = ''; redrawList(); return; }
+    if (t.id === 'ad-bno') { bulk.step = ''; redrawList(); return; }
+    if (t.id === 'ad-bnext') { try { const pl = bulkPlan(); bulk = { field: bulk.field, step: 'ask', set: pl.set, text: pl.text, busy: false }; } catch (er) { bulk.err = String(er.message || er); } redrawList(); return; }
+    if (t.id === 'ad-bgo') { if (!bulk.busy) runBulk(); return; }
     if (t.id === 'ad-reload') { load(); return; }
     if (t.id === 'ad-uadd') { openUser(null); return; }
     if (t.id === 'ad-inv' || t.id === 'ad-inv2') { inv = { step: 'ask', text: '', again: t.id === 'ad-inv2' }; render(); return; }
@@ -386,13 +516,21 @@ export function mount(ROOT, CORE) {
     if (t.closest('[data-close]')) { dlg.close(); return; }
   });
   ROOT.addEventListener('input', e => {
-    if (e.target.id !== 'ad-q') return;
-    q = e.target.value; const pos = e.target.selectionStart;
-    render();
-    const el = ROOT.querySelector('#ad-q'); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (er) {} }
+    const t = e.target;
+    if (t.id === 'ad-q') flt.q = t.value; else if (t.id === 'ad-fm1') flt.m1 = t.value; else if (t.id === 'ad-fm2') flt.m2 = t.value; else return;
+    redrawList();
   });
   ROOT.addEventListener('change', async e => {
     const t = e.target;
+    if (t.id === 'ad-fcls') { flt.cls = t.value; redrawList(); return; }
+    if (t.id === 'ad-fgrade') { flt.grade = t.value; redrawList(); return; }
+    if (t.id === 'ad-fsort') { flt.sort = t.value; redrawList(); return; }
+    if (t.id === 'ad-fnomail') { flt.noMail = t.checked; redrawList(); return; }
+    if (t.id === 'ad-fnobirth') { flt.noBirth = t.checked; redrawList(); return; }
+    if (t.dataset && t.dataset.sel) { if (t.checked) sel.add(t.dataset.sel); else sel.delete(t.dataset.sel); bulk.step = ''; redrawList(); return; }
+    if (t.id === 'ad-selall') { filtered().forEach(p => { const id = String(p['選手ID']); if (t.checked) sel.add(id); else sel.delete(id); }); bulk.step = ''; redrawList(); return; }
+    if (t.id === 'ad-bf') { bulk.field = t.value; bulk.err = ''; redrawList(); return; }
+    if (t.id === 'ad-bv') { const nb = ROOT.querySelector('#ad-bnewbox'); if (nb) nb.hidden = t.value !== NEWCLASS; return; }
     if (t.id === 'ad-impfile') { if (t.files && t.files[0]) readImport(t.files[0]); return; }
     if (t.name === 'role' && form.contains(t)) { syncRole(); return; }
     if (t.name === '基準の型' && form.contains(t)) { syncStd(); return; }
@@ -411,10 +549,12 @@ export function mount(ROOT, CORE) {
     btn.disabled = true; m.textContent = '';
     try {
       if (form.dataset.kind === 'user') await saveUser(); else if (form.dataset.kind === 'item') await saveItem(); else await savePlayer();
-      dlg.close(); await load();
+      const kind = form.dataset.kind;
+      dlg.close(); if (kind === 'item') await loadItems(true).catch(() => {});
+      await load();
     } catch (er) { m.textContent = String(er.message || er); btn.disabled = false; }
   });
 
-  ROOT.addEventListener('bt:show', () => { if (!loading) load(); });
+  ROOT.addEventListener('bt:show', () => { if (!loading && Date.now() - loadedAt > 60000) load(); });
   load();
 }

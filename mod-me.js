@@ -20,6 +20,12 @@ const CSS = `
 #tab-me .role{ display:inline-block; font-size:12px; border:1px solid var(--gold); border-radius:999px; padding:1px 10px; margin-left:8px; color:var(--ink2); vertical-align:middle; font-weight:400 }
 #tab-me .links{ display:flex; flex-direction:column; gap:8px; margin-top:12px }
 #tab-me .links button{ text-align:left }
+#tab-me .news{ list-style:none; margin:0; padding:0 }
+#tab-me .news li{ border-top:1px solid var(--line); padding:10px 0 }
+#tab-me .news li:first-child{ border-top:0; padding-top:0 }
+#tab-me .news b{ font-size:15px } #tab-me .news .meta{ font-size:12px; color:var(--muted); margin:2px 0 6px }
+#tab-me .news .tx{ white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; line-height:1.7 }
+#tab-me .news .new{ display:inline-block; font-size:11px; font-weight:700; color:var(--goldInk); border:1px solid var(--gold); border-radius:999px; padding:0 8px; margin-left:6px; vertical-align:middle }
 #tab-me .must{ background:var(--warnBg); color:var(--warn); border:1px solid var(--warn); border-radius:var(--r); padding:12px 14px; margin-bottom:14px; font-size:14px; font-weight:700 }
 `;
 
@@ -88,12 +94,15 @@ export function mount(ROOT, CORE) {
         <button class="b" id="me-forgot" style="margin-top:10px; font-size:13px">パスワードを忘れたとき</button></div></div>`; return;
     }
     const others = CORE.tabs().filter(t => t.key !== 'me');
+    const news = CORE.role() === '選手' && !c.must ? (CORE.data.state.messages || []) : null, seen = store.get('msg-seen') || [];
     const name = (c.me && c.me.name) || (c.user && c.user.name) || '';
     ROOT.innerHTML = `<div class="pw"><h2>マイページ</h2>
       ${c.must ? `<div class="must" id="me-must">最初に、パスワードを自分だけのものに変えてください。変えるまで、ほかのページは開けません。</div>` : ''}
       ${srvErr ? `<div class="must" id="me-srverr">${esc(srvErr)}</div>` : ''}
       <div class="card"><p class="note">ログイン中</p><div class="who"><span id="me-name">${esc(name)}</span><span class="role" id="me-role">${esc(CORE.role())}</span></div>
         ${others.length ? `<div class="links">${others.map(t => `<button class="b" data-go="${esc(t.key)}">${esc(t.label)}を開く</button>`).join('')}</div>` : ''}</div>
+      ${news ? `<div class="card" id="me-news"><h3>お知らせ</h3>${news.length ? `<ul class="news">${news.map(m => `<li><b>${esc(m.subject)}</b>${seen.indexOf(m.id) < 0 ? '<span class="new">新着</span>' : ''}
+          <div class="meta">${esc(String(m.at).slice(0, 16))}　${esc(m.from)}</div><div class="tx">${esc(m.body)}</div></li>`).join('')}</ul>` : '<p class="note" id="me-nonews">お知らせはまだありません。</p>'}</div>` : ''}
       <div class="card"><h3>パスワードを変える</h3>
         <label class="f">今のパスワード<input id="me-old" type="password" autocomplete="current-password"></label>
         <label class="f">新しいパスワード（6文字以上）<input id="me-new" type="password" autocomplete="new-password"></label>
@@ -111,6 +120,7 @@ export function mount(ROOT, CORE) {
       const j = await CORE.session;
       if (j && !j.ok && j.error && !j.mustChange) { srvErr = j.error; render(); }
       else if (j && j.ok) render();
+      markSeen();
       return;
     }
     if (!CORE.appUrl()) { view = 'nourl'; render(); return; }
@@ -131,6 +141,13 @@ export function mount(ROOT, CORE) {
     } catch (e) { view = 'error'; msg = String(e.message || e); }
     render();
   }
+  /* お知らせを見たら「新着」の印を消す（この画面を開いている間は、印を残しておく） */
+  function markSeen() {
+    if (CORE.role() !== '選手' || ROOT.hidden) return;
+    const ids = (CORE.data.state.messages || []).map(m => m.id); if (!ids.length) return;
+    store.set('msg-seen', ids); document.querySelector('#tabs button[data-tab="me"]')?.classList.remove('dot');
+  }
+  ROOT.addEventListener('bt:show', () => { if (view === 'in') markSeen(); });
   function enter(j) {
     CORE.setConn({ token: j.token, user: { id: j.user.id, name: j.user.name, role: j.user.role }, exp: j.exp, must: !!j.user.must });
     store.del('tab');
@@ -215,6 +232,9 @@ export function mount(ROOT, CORE) {
       busy = false; render(); return;
     }
     if (t.id === 'me-logout') {
+      const dr = Object.keys((store.get('ph-draft') || {}).draft || {}).length;
+      if (dr && t.dataset.sure !== '1') { t.dataset.sure = '1'; t.textContent = 'ログアウトする（未保存の入力を捨てる）';
+        t.insertAdjacentHTML('afterend', `<div class="msg" id="me-outwarn">計測に、まだ保存していない入力が ${dr}件あります。ログアウトすると消えます。よければ、もう一度押してください。</div>`); return; }
       busy = true;
       try { await api('logout'); } catch (er) {}
       store.wipe();                                   // この端末に残した自分のデータの控えも消す
