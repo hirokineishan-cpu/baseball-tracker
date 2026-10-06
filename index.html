@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14233f">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>BaseballTracker</title>
+<link rel="preconnect" href="https://script.google.com" crossorigin>
+<style>
+/* ==== 共通（色と土台）。部品はここの色の名前だけを使う ==== */
+:root{
+  color-scheme: light dark;
+  /* ネイビー基調、ゴールドを差し色に。--grassDeep は帯の色の名前（参考システムの部品と名前を合わせてある） */
+  --grassDeep:#14233f; --accent:#1b3158; --accentInk:#ffffff; --gold:#c9a227; --goldInk:#7a5c00;
+  --ground:#f2f3f6; --paper:#ffffff; --raise:#f5f6f9; --line:#d3d7df;
+  --ink:#151b26; --ink2:#364154; --muted:#5b6577;
+  --clay:#b0432a; --hit:#1e7a45; --warn:#7a5c00; --warnBg:#fbf3d9;
+  --r:12px; --barH:46px;
+  --jp: system-ui, -apple-system, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", "Noto Sans JP", sans-serif;
+  --num: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas", monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --grassDeep:#0e1830; --accent:#d9b648; --accentInk:#141a26; --gold:#d9b648; --goldInk:#e6c765;
+    --ground:#0d121c; --paper:#151c2a; --raise:#1c2536; --line:#2f3a4f;
+    --ink:#e8ebf1; --ink2:#c3cad6; --muted:#97a1b2;
+    --clay:#f08a6c; --hit:#63c990; --warn:#e6c765; --warnBg:#2e2710;
+  }
+}
+*{ box-sizing:border-box }
+html{ -webkit-text-size-adjust:100% }
+body{ margin:0; background:var(--ground); color:var(--ink); font-family:var(--jp); font-size:15px; line-height:1.6;
+  overflow-wrap:anywhere }
+button, input, select, textarea{ font:inherit; color:inherit }
+[hidden]{ display:none !important }
+:focus-visible{ outline:2px solid var(--gold); outline-offset:2px }
+
+/* ==== 外枠 ==== */
+#bar{
+  position:fixed; top:0; left:0; right:0; z-index:300;
+  height:calc(var(--barH) + env(safe-area-inset-top)); padding-top:env(safe-area-inset-top);
+  display:flex; align-items:stretch; background:var(--grassDeep); color:#fff;
+  box-shadow:0 2px 0 var(--gold);
+}
+#bar .tt{ display:flex; align-items:center; padding:0 14px; font-weight:700; font-size:13px; letter-spacing:.04em; white-space:nowrap; opacity:.92 }
+#bar nav{ display:flex; min-width:0 }
+#bar button{
+  min-width:0; appearance:none; border:0; background:transparent; color:#fff;
+  font-size:14px; font-weight:600; letter-spacing:.03em; padding:0 20px; cursor:pointer; position:relative; opacity:.66;
+  border-radius:0; white-space:nowrap;
+}
+#bar button:hover{ opacity:.88 }
+#bar button[aria-selected="true"]{ opacity:1 }
+#bar button[aria-selected="true"]::after{ content:""; position:absolute; left:10%; right:10%; bottom:0; height:3px; background:var(--gold); border-radius:3px 3px 0 0 }
+#bar button:focus-visible{ outline:2px solid var(--gold); outline-offset:-3px }
+main{ padding-top:calc(var(--barH) + env(safe-area-inset-top)) }
+#boot{ padding:28px 18px; color:var(--muted); font-size:13px; text-align:center }
+#boot b{ display:block; color:var(--ink); font-size:14px; margin-bottom:6px }
+#toast{
+  position:fixed; left:50%; bottom:calc(20px + env(safe-area-inset-bottom)); transform:translateX(-50%); z-index:500;
+  max-width:min(92vw,520px); background:var(--ink); color:var(--paper); font-size:14px; padding:10px 16px; border-radius:999px;
+  box-shadow:0 6px 20px rgba(0,0,0,.25); opacity:0; pointer-events:none; transition:opacity .15s;
+}
+#toast.on{ opacity:1 }
+@media (max-width:560px){
+  #bar .tt{ padding:0 10px; font-size:12px; max-width:34vw; overflow:hidden; text-overflow:ellipsis }
+  #bar nav{ flex:1 }
+  #bar button{ flex:1; padding:0 4px; font-size:13px; letter-spacing:0 }
+}
+@media (max-width:370px){ #bar.multi .tt{ display:none } }
+@media (max-height:520px) and (orientation:landscape){ :root{ --barH:34px } #bar button{ font-size:12.5px } }
+@media print{ #bar, #toast{ display:none !important } main{ padding-top:0 !important } }
+</style>
+</head>
+<body>
+
+<header id="bar">
+  <span class="tt">BaseballTracker</span>
+  <nav role="tablist" id="tabs"></nav>
+</header>
+
+<main id="main">
+  <div id="boot"><b>読み込んでいます…</b>しばらく待っても変わらないときは、画面を下に引いて更新してください。</div>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script type="module">
+/* 外枠：設定を配り、だれがログインしているかで出すタブを決め、タブを開いたときに部品を読み込むだけ。
+   部品の中身には関与しない。見えてよいかどうかは、サーバー側でも必ず確かめている。 */
+const CFG = {
+  TEAM_ID:"bt1",        /* チームの名札。サーバー（Code.gs の TEAM_TAG）と同じにする。保存領域の名前にも入る */
+  APP_URL_B64:"aHR0cHM6Ly9zY3JpcHQuZ29vZ2xlLmNvbS9tYWNyb3Mvcy9BS2Z5Y2J3OWNIUWcyUXprRVpwc1k4NENXZkwzVmRTWVRrVzhZc3FOYTdMUzBKOFZ2U2hCUEtDcjNZaGhuZ1hkczVkWmpXVHQvZXhlYw==",       /* 接続先（GAS の URL）を符号化したもの */
+  STORE:""              /* 試験中だけ "-t" などを入れて、本番の保存領域と分ける */
+};
+
+/* ---- 項目（機能）を足すときは、この2つの表に足す ----
+   1) 部品の一覧：タブの名前と、部品のファイル */
+const PARTS = {
+  physical: { label:'フィジカル', file:'./mod-physical.js' },
+  admin: { label:'管理',       file:'./mod-admin.js' },
+  me:    { label:'マイページ', file:'./mod-me.js' }
+};
+/* 2) 立場ごとに出すタブ（左から順）。guest＝まだログインしていない */
+const TABS = {
+  '管理':     ['physical', 'admin', 'me'],
+  'スタッフ': ['physical', 'me'],
+  '選手':     ['physical', 'me'],
+  guest:      ['me']
+};
+
+/* ---- 端末に残すデータの名前には、必ずチームの名札を入れる ---- */
+const SUFFIX = '-' + CFG.TEAM_ID + CFG.STORE;
+const key = name => 'bt-' + name + SUFFIX;
+const store = {
+  get(name){ try { return JSON.parse(localStorage.getItem(key(name)) || 'null'); } catch(e){ return null; } },
+  set(name, v){ try { localStorage.setItem(key(name), JSON.stringify(v)); } catch(e){} },
+  del(name){ try { localStorage.removeItem(key(name)); } catch(e){} },
+  /* この端末に残した自分のデータをすべて消す（ログアウトのとき） */
+  wipe(){ try { Object.keys(localStorage).filter(k => k.indexOf('bt-') === 0 && k.endsWith(SUFFIX)).forEach(k => localStorage.removeItem(k)); } catch(e){} }
+};
+/* メールの案内のリンク（…/#reset=…）で開いたとき。この端末にだれかのログインが残っていても、いったん外す */
+const RESET = (/^#reset=([0-9a-f]{48})$/.exec(location.hash) || [])[1] || '';
+if (RESET) store.wipe();
+const conn = () => store.get('conn') || {};
+function appUrl(){
+  let u = ''; try { u = atob(String(CFG.APP_URL_B64 || '').trim()); } catch(e){}
+  return /^https?:\/\/.+/.test(u) ? u : '';
+}
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+let toastT = null;
+function toast(msg){
+  const el = document.getElementById('toast'); el.textContent = msg; el.classList.add('on');
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('on'), 2600);
+}
+
+/* サーバーへの送信。{ action, token, ... } を送り、{ ok, ... } を受け取る。
+   Content-Type を text/plain にすると、ブラウザの事前確認が起きず、GAS でそのまま受け取れる。 */
+async function api(action, payload){
+  const url = appUrl();
+  if (!url) throw new Error('接続先がまだ設定されていません');
+  const c = conn();
+  let res;
+  try {
+    res = await fetch(url, { method:'POST', headers:{ 'Content-Type':'text/plain;charset=utf-8' },
+      body: JSON.stringify(Object.assign({ action }, c.token ? { token: c.token } : {}, payload || {})) });
+  } catch (e) { throw new Error('通信できませんでした。電波の届くところで、もう一度試してください'); }
+  let j; try { j = await res.json(); } catch (e) { throw new Error('サーバーから正しい返事がありませんでした'); }
+  if (j && !j.ok && c.token) {
+    if (j.error === 'unauthorized') { store.del('conn'); location.reload(); throw new Error('ログインが切れました。もう一度ログインしてください'); }
+    if (j.mustChange && !c.must) { store.set('conn', Object.assign(c, { must:true })); location.reload(); }
+  }
+  return j;
+}
+
+function modeNow(){
+  const c = conn(), role = String(c.token && c.user && c.user.role || '');
+  if (!TABS[role]) return 'guest';
+  return c.must ? 'must:' + role : role;
+}
+/* 最初のパスワード変更が済むまでは、マイページだけ */
+const tabsOf = mode => mode.indexOf('must:') === 0 ? ['me'] : TABS[mode];
+
+const CORE = { cfg:CFG, resetToken:RESET, api, conn, store, esc, toast, key, appUrl,
+  role: () => { const m = modeNow(); return m.replace('must:', ''); },
+  setConn(v){ store.set('conn', v); },
+  go(tab){ show(tab); },
+  tabs: () => tabsOf(mode).map(k => ({ key:k, label:PARTS[k].label })),
+  barH: () => (document.getElementById('bar')?.offsetHeight || 0) };
+
+/* ログイン中なら、サーバーの返事（me）を部品にも渡す。まだなら null */
+CORE.session = conn().token ? api('me').catch(() => null) : Promise.resolve(null);
+
+const mode = modeNow();
+const vis = tabsOf(mode);
+const loaded = {};
+const boot = document.getElementById('boot');
+const nav = document.getElementById('tabs');
+const main = document.getElementById('main');
+
+vis.forEach(k => {
+  const b = document.createElement('button');
+  b.setAttribute('role', 'tab'); b.dataset.tab = k; b.textContent = PARTS[k].label; b.setAttribute('aria-selected', 'false');
+  nav.appendChild(b);
+  const s = document.createElement('section'); s.id = 'tab-' + k; s.hidden = true;
+  main.insertBefore(s, boot);
+});
+nav.hidden = vis.length < 2;               // タブが1つだけのときは帯に出さない
+document.getElementById('bar').classList.toggle('multi', vis.length >= 2);
+
+async function show(k){
+  if (vis.indexOf(k) < 0) k = vis[0];
+  main.querySelectorAll(':scope > section').forEach(s => { s.hidden = (s.id !== 'tab-' + k); });
+  nav.querySelectorAll('button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === k)));
+  if (vis.length > 1) store.set('tab', k);     // 選べるタブがあるときだけ覚える
+  const root = document.getElementById('tab-' + k);
+  if (!loaded[k]) {
+    loaded[k] = true;
+    boot.hidden = false;
+    boot.innerHTML = '<b>' + esc(PARTS[k].label) + 'を読み込んでいます…</b>';
+    try {
+      const m = await import(PARTS[k].file);
+      await m.mount(root, CORE);
+    } catch (e) {
+      loaded[k] = false;
+      boot.hidden = false;
+      boot.innerHTML = '<b>読み込めませんでした</b>' + esc(String(e && e.message || e)) + '<br>電波の届くところで開き直してください。';
+      return;
+    }
+  }
+  boot.hidden = true;
+  root.dispatchEvent(new CustomEvent('bt:show'));
+}
+nav.addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) show(b.dataset.tab); });
+
+let first = vis[0];
+const saved = store.get('tab');
+if (saved && vis.indexOf(saved) >= 0) first = saved;
+if (location.hash === '#me') first = 'me';      // 選手用のリンク（…/#me）
+show(first);
+
+/* ログイン中なら、立場や名前が変わっていないかをサーバーに確かめる（停止されていれば、ここでログイン画面に戻る） */
+CORE.session.then(j => {
+  if (!j || !j.ok) return;
+  const c = conn(), before = modeNow();
+  c.user = { id:j.user.id, name:j.user.name, role:j.user.role }; c.must = !!j.user.must;
+  if (j.me) c.me = j.me;
+  store.set('conn', c);
+  if (modeNow() !== before) location.reload();
+});
+/* 開いたまま選手用のリンク（#me）に切り替わったとき */
+window.addEventListener('hashchange', () => { if (location.hash === '#me') show('me'); });
+/* ほかのタブでログイン・ログアウトしたとき */
+window.addEventListener('storage', e => { if (e.key === key('conn') && modeNow() !== mode) location.reload(); });
+</script>
+</body>
+</html>
