@@ -51,6 +51,7 @@ button, input, select, textarea{ font:inherit; color:inherit }
   border-radius:0; white-space:nowrap;
 }
 #bar button .sm{ display:none }
+a.lnk{ color:inherit; text-decoration:underline; text-decoration-color:var(--gold); text-decoration-thickness:2px; text-underline-offset:3px; overflow-wrap:anywhere; word-break:break-all }
 #bar button.dot::after{ content:''; display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--gold); margin-left:5px; vertical-align:middle }
 #bar button:hover{ opacity:.88 }
 #bar button[aria-selected="true"]{ opacity:1 }
@@ -106,12 +107,12 @@ const CFG = {
 /* ---- 項目（機能）を足すときは、この2つの表に足す ----
    1) 部品の一覧：タブの名前と、部品のファイル */
 const PARTS = {
-  physical: { label:'計測',           file:'./mod-physical.js?v=202610071408' },
-  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610071408' },
-  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610071408' },
-  admin:    { label:'管理',           file:'./mod-admin.js?v=202610071408' },
-  news:     { label:'お知らせ',       file:'./mod-news.js?v=202610071408' },
-  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610071408' }
+  physical: { label:'計測',           file:'./mod-physical.js?v=202610071419' },
+  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610071419' },
+  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610071419' },
+  admin:    { label:'管理',           file:'./mod-admin.js?v=202610071419' },
+  news:     { label:'お知らせ',       file:'./mod-news.js?v=202610071419' },
+  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610071419' }
 };
 /* 2) 立場ごとに出すタブ（左から順）。guest＝まだログインしていない */
 const TABS = {
@@ -173,7 +174,16 @@ function modeNow(){
 /* 最初のパスワード変更が済むまでは、マイページだけ */
 const tabsOf = mode => mode.indexOf('must:') === 0 ? ['me'] : TABS[mode];
 
-const CORE = { cfg:CFG, resetToken:RESET, api, conn, store, esc, toast, key, appUrl,
+/* 本文の中の URL（http・https で始まるものだけ）を、押せるリンクにする。ほかの文字は、今までどおり文字のまま出す */
+function linkify(text){
+  return String(text == null ? '' : text).split(/(https?:\/\/[^\s<>"'`\u3000（）「」『』【】、。]+)/).map((part, i) => {
+    if (i % 2 === 0) return esc(part);
+    const m = /[.,;:!?)\]]+$/.exec(part), tail = m ? m[0] : '', url = tail ? part.slice(0, -tail.length) : part;   // 文の終わりの記号は、リンクに入れない
+    let ok = false; try { const u = new URL(url); ok = (u.protocol === 'https:' || u.protocol === 'http:') && !!u.hostname; } catch (e) {}
+    return (ok ? '<a class="lnk" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(url) + '</a>' : esc(url)) + esc(tail);
+  }).join('');
+}
+const CORE = { linkify, cfg:CFG, resetToken:RESET, api, conn, store, esc, toast, key, appUrl,
   role: () => { const m = modeNow(); return m.replace('must:', ''); },
   setConn(v){ store.set('conn', v); },
   go(tab){ show(tab); },

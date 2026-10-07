@@ -97,7 +97,7 @@ export function mount(ROOT, CORE) {
         <label class="f">本文（${BODY_MAX}文字まで）<textarea id="mg-body" maxlength="${BODY_MAX}">${esc(S.body)}</textarea></label>
         <p class="note" id="mg-len">${S.body.length} / ${BODY_MAX}文字</p>
         <label class="chk"><input type="checkbox" id="mg-email" ${S.email ? 'checked' : ''}> メールでも送る</label>
-        <p class="note">送ったお知らせは、選手のマイページに出ます。「メールでも送る」を選ぶと、選手名簿のメールアドレスにも届きます（同じアドレスには1通だけ）。${quota == null ? '' : `今日あと <b id="mg-quota">${quota}</b> 通送れます。`}</p>
+        <p class="note">送ったお知らせは、選手のマイページに出ます。「メールでも送る」を選ぶと、選手名簿のメールアドレスにも届きます（同じアドレスには1通だけ）。本文に URL（https://…）を書くと、選手の画面で押せるリンクになります。${quota == null ? '' : `今日あと <b id="mg-quota">${quota}</b> 通送れます。`}</p>
         <div class="msg" id="mg-err">${esc(err)}</div>
         <div class="acts"><button class="b primary" id="mg-next">確認へ</button><button class="b" id="mg-reset">入力を消す</button></div>
       </div>`;
@@ -111,7 +111,7 @@ export function mount(ROOT, CORE) {
       <p class="sum">${S.email ? `マイページと、メール（最大 ${s.mail}通）で届けます。` : 'マイページに届けます（メールは送りません）。'}</p>
       ${over ? `<p class="msg" id="mg-over">今日メールで送れるのは、あと ${quota}通です。入りきらない分はメールでは届かず、マイページだけに出ます。</p>` : ''}
       <p class="sum" style="font-weight:700; margin-top:12px">${esc(S.subject)}</p>
-      <div class="pv" id="mg-pv">${esc(S.body)}</div>
+      <div class="pv" id="mg-pv">${CORE.linkify(S.body)}</div>
       <div class="msg" id="mg-err">${esc(err)}</div>
       <div class="acts"><button class="b primary" id="mg-send" ${busy ? 'disabled' : ''}>${busy ? '送っています…' : '送る'}</button><button class="b" id="mg-back" ${busy ? 'disabled' : ''}>直す</button></div>
       ${busy && S.email ? '<p class="note">メールは1通ずつ送るので、人数が多いと1〜2分かかります。このまま待ってください。</p>' : ''}</div>`;
@@ -127,7 +127,7 @@ export function mount(ROOT, CORE) {
       ${histErr ? `<div class="msg">${esc(histErr)}</div>` : !histAt ? '<p class="note">読み込んでいます…</p>' : !hist.length ? '<p class="note" id="mg-nohist">まだ送っていません。</p>' :
         `<ul class="hist">${hist.map(m => `<li><b>${esc(m.subject)}</b>
           <div class="meta">${esc(String(m.at).slice(0, 16))}　${esc(m.from)}　→　${esc(m.mode === 'クラス' ? 'クラス：' : '')}${esc(m.to)}（${m.count}人）${m.mailed ? '　メール ' + m.mailed + '通' : ''}${m.unsent ? '　メールで送れず ' + m.unsent + '通' : ''}</div>
-          <details><summary>本文を見る</summary><div class="pv">${esc(m.body)}</div></details></li>`).join('')}</ul>`}</div>`;
+          <details><summary>本文を見る</summary><div class="pv">${CORE.linkify(m.body)}</div></details></li>`).join('')}</ul>`}</div>`;
   }
   function render() {
     const sy = window.scrollY;

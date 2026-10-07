@@ -31,7 +31,7 @@ export function mount(ROOT, CORE) {
       ${D.error ? `<p class="msg" id="nw-err">${esc(D.error)}</p>` : ''}
       ${!D.ready ? '<div class="empty">読み込んでいます…</div>' : !list.length ? '<div class="empty" id="nw-empty">お知らせはまだありません。</div>' :
         `<div id="nw-list">${list.map(m => `<div class="item ${fresh.has(m.id) ? 'unread' : ''}"><b>${esc(m.subject)}</b>${fresh.has(m.id) ? '<span class="new">新着</span>' : ''}
-          <div class="meta">${esc(String(m.at).slice(0, 16))}　${esc(m.from)}</div><div class="tx">${esc(m.body)}</div></div>`).join('')}</div>`}</div>`;
+          <div class="meta">${esc(String(m.at).slice(0, 16))}　${esc(m.from)}</div><div class="tx">${CORE.linkify(m.body)}</div></div>`).join('')}</div>`}</div>`;
   }
   /* 見たら、タブの印を消す */
   function markSeen() {
