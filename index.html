@@ -106,17 +106,18 @@ const CFG = {
 /* ---- 項目（機能）を足すときは、この2つの表に足す ----
    1) 部品の一覧：タブの名前と、部品のファイル */
 const PARTS = {
-  physical: { label:'計測',           file:'./mod-physical.js?v=202610070331' },
-  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610070331' },
-  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610070331' },
-  admin:    { label:'管理',           file:'./mod-admin.js?v=202610070331' },
-  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610070331' }
+  physical: { label:'計測',           file:'./mod-physical.js?v=202610071408' },
+  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610071408' },
+  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610071408' },
+  admin:    { label:'管理',           file:'./mod-admin.js?v=202610071408' },
+  news:     { label:'お知らせ',       file:'./mod-news.js?v=202610071408' },
+  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610071408' }
 };
 /* 2) 立場ごとに出すタブ（左から順）。guest＝まだログインしていない */
 const TABS = {
   '管理':     ['physical', 'analysis', 'message', 'admin', 'me'],
   'スタッフ': ['physical', 'analysis', 'message', 'me'],
-  '選手':     ['physical', 'me'],          /* 解析とメッセージ配信は、選手には出さない（サーバーも断る） */
+  '選手':     ['physical', 'news', 'me'],          /* 解析とメッセージ配信は、選手には出さない（サーバーも断る） */
   guest:      ['me']
 };
 
@@ -299,9 +300,9 @@ CORE.session.then(j => {
   if (j.me) c.me = j.me;
   store.set('conn', c);
   if (modeNow() !== before) { location.reload(); return; }
-  /* 選手：まだ読んでいないお知らせがあれば、マイページのタブに印を付ける */
+  /* 選手：まだ読んでいないお知らせがあれば、「お知らせ」のタブに印を付ける */
   if (mode === '選手' && DATA.messages.length) { const seen = store.get('msg-seen') || [];
-    if (DATA.messages.some(m => seen.indexOf(m.id) < 0)) nav.querySelector('button[data-tab="me"]')?.classList.add('dot'); }
+    if (DATA.messages.some(m => seen.indexOf(m.id) < 0)) nav.querySelector('button[data-tab="news"]:not([aria-selected="true"])')?.classList.add('dot'); }
 });
 /* ほかの人の入力を受け取る：スタッフの画面は、見えている間、45秒ごとに「変わった分」だけを確かめる。
    変わっていなければ、サーバーはシートを読まずにすぐ返す。 */

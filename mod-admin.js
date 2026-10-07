@@ -1,4 +1,4 @@
-import { schoolGrade, monthsOld } from './mod-physical.js?v=202610070331';
+import { schoolGrade, monthsOld } from './mod-physical.js?v=202610071408';
 
 /* 管理（管理者だけ）
    ・ユーザー：追加、立場の変更、選手との結び付け、停止、パスワードの入れ直し
