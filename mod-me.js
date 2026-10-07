@@ -85,6 +85,7 @@ export function mount(ROOT, CORE) {
         <button class="b primary" id="me-login" ${busy ? 'disabled' : ''}>${busy ? 'ログインしています…' : 'ログイン'}</button>
         <div class="msg">${esc(msg)}</div>
         <p class="note" style="margin-top:12px">IDは、スタッフからの案内（メール）に書いてあります。</p>
+        ${store.kind !== 'local' ? `<p class="note" id="me-weak" style="margin-top:8px">この画面（メールアプリの中など）では、閉じるとログインが残りません。ふだんは Safari や Chrome でこのページを開くと、ログインしたまま使えます。</p>` : ''}
         <button class="b" id="me-forgot" style="margin-top:10px; font-size:13px">パスワードを忘れたとき</button></div></div>`; return;
     }
     const others = CORE.tabs().filter(t => t.key !== 'me');
@@ -134,14 +135,14 @@ export function mount(ROOT, CORE) {
   function enter(j) {
     CORE.setConn({ token: j.token, user: { id: j.user.id, name: j.user.name, role: j.user.role }, exp: j.exp, must: !!j.user.must });
     store.del('tab');
-    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+    CORE.resetDone();                               // メールのリンクで開いていたら、そのリンクは使い終わりにする
     location.reload();
   }
 
   ROOT.addEventListener('click', async e => {
     const t = e.target;
     if (t.id === 'me-retry') { check(); return; }
-    if (t.id === 'rs-login') { history.replaceState(null, '', location.pathname + location.search); location.reload(); return; }
+    if (t.id === 'rs-login') { CORE.resetDone(); location.reload(); return; }
     if (t.id === 'me-forgot') { view = 'forgot'; msg = okMsg = ''; render(); return; }
     if (t.id === 'fg-back') { view = 'login'; msg = okMsg = ''; render(); return; }
     const go = t.closest('[data-go]'); if (go) { CORE.go(go.dataset.go); return; }

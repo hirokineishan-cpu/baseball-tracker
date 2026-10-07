@@ -107,12 +107,12 @@ const CFG = {
 /* ---- 項目（機能）を足すときは、この2つの表に足す ----
    1) 部品の一覧：タブの名前と、部品のファイル */
 const PARTS = {
-  physical: { label:'計測',           file:'./mod-physical.js?v=202610071519' },
-  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610071519' },
-  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610071519' },
-  admin:    { label:'管理',           file:'./mod-admin.js?v=202610071519' },
-  news:     { label:'お知らせ',       file:'./mod-news.js?v=202610071519' },
-  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610071519' }
+  physical: { label:'計測',           file:'./mod-physical.js?v=202610071528' },
+  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610071528' },
+  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610071528' },
+  admin:    { label:'管理',           file:'./mod-admin.js?v=202610071528' },
+  news:     { label:'お知らせ',       file:'./mod-news.js?v=202610071528' },
+  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610071528' }
 };
 /* 2) 立場ごとに出すタブ（左から順）。guest＝まだログインしていない */
 const TABS = {
@@ -125,15 +125,32 @@ const TABS = {
 /* ---- 端末に残すデータの名前には、必ずチームの名札を入れる ---- */
 const SUFFIX = '-' + CFG.TEAM_ID + CFG.STORE;
 const key = name => 'bt-' + name + SUFFIX;
+/* 保存する場所。ふつうは localStorage。メールアプリの中の画面などで使えないときは、
+   sessionStorage、それも駄目なら window.name（同じ画面を開いている間だけ残る）に切り替える。
+   ここが働かないと、ログインしても、開き直したときにログイン画面へ戻ってしまう。 */
+function pickBox(){
+  const probe = b => { try { const k = 'bt-probe'; b.setItem(k, '1'); const ok = b.getItem(k) === '1'; b.removeItem(k); return ok; } catch(e){ return false; } };
+  try { if (probe(window.localStorage)) return { kind:'local', box:window.localStorage }; } catch(e){}
+  try { if (probe(window.sessionStorage)) return { kind:'session', box:window.sessionStorage }; } catch(e){}
+  const TAG = 'bt-box:'; let m = {};
+  try { if (String(window.name).indexOf(TAG) === 0) m = JSON.parse(String(window.name).slice(TAG.length)) || {}; } catch(e){ m = {}; }
+  const save = () => { try { window.name = TAG + JSON.stringify(m); } catch(e){} };
+  return { kind:'name', box:{ getItem:k => (k in m ? m[k] : null), setItem(k, v){ m[k] = String(v); save(); }, removeItem(k){ delete m[k]; save(); }, keys:() => Object.keys(m) } };
+}
+const BOX = pickBox();
+const boxKeys = () => BOX.box.keys ? BOX.box.keys() : Object.keys(BOX.box);
 const store = {
-  get(name){ try { return JSON.parse(localStorage.getItem(key(name)) || 'null'); } catch(e){ return null; } },
-  set(name, v){ try { localStorage.setItem(key(name), JSON.stringify(v)); } catch(e){} },
-  del(name){ try { localStorage.removeItem(key(name)); } catch(e){} },
+  kind: BOX.kind,
+  get(name){ try { return JSON.parse(BOX.box.getItem(key(name)) || 'null'); } catch(e){ return null; } },
+  set(name, v){ try { BOX.box.setItem(key(name), JSON.stringify(v)); } catch(e){} },
+  del(name){ try { BOX.box.removeItem(key(name)); } catch(e){} },
   /* この端末に残した自分のデータをすべて消す（ログアウトのとき） */
-  wipe(){ try { Object.keys(localStorage).filter(k => k.indexOf('bt-') === 0 && k.endsWith(SUFFIX)).forEach(k => localStorage.removeItem(k)); } catch(e){} }
+  wipe(){ try { boxKeys().filter(k => k.indexOf('bt-') === 0 && k.endsWith(SUFFIX)).forEach(k => BOX.box.removeItem(k)); } catch(e){} }
 };
 /* メールの案内のリンク（…/#reset=…）で開いたとき。この端末にだれかのログインが残っていても、いったん外す */
-const RESET = (/^#reset=([0-9a-f]{48})$/.exec(location.hash) || [])[1] || '';
+/* 使い終わったリンクは、アドレスに残っていても無視する（メールアプリの中の画面は、開き直すと元のリンクのアドレスに戻ることがある） */
+const RESET_RAW = (/^#reset=([0-9a-f]{48})$/.exec(location.hash) || [])[1] || '';
+const RESET = RESET_RAW && store.get('rt-done') !== RESET_RAW ? RESET_RAW : '';
 /* メールのリンク（#reset=…）で開いたタブは、ログインしていない扱いにする。
    端末に残っているログインは消さない（前は消していたため、このタブが開いたままだと、ほかのタブのログインが毎回消えていた） */
 const conn = () => RESET ? {} : (store.get('conn') || {});
@@ -184,7 +201,7 @@ function linkify(text){
     return (ok ? '<a class="lnk" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(url) + '</a>' : esc(url)) + esc(tail);
   }).join('');
 }
-const CORE = { linkify, cfg:CFG, resetToken:RESET, api, conn, store, esc, toast, key, appUrl,
+const CORE = { linkify, cfg:CFG, resetToken:RESET, resetDone(){ if (RESET_RAW) store.set('rt-done', RESET_RAW); try { history.replaceState(null, '', location.pathname + location.search); } catch(e){} }, api, conn, store, esc, toast, key, appUrl,
   role: () => { const m = modeNow(); return m.replace('must:', ''); },
   setConn(v){ store.set('conn', v); },
   go(tab){ show(tab); },
@@ -198,7 +215,8 @@ const DATA = { ready:false, players:[], items:[], cells:new Map(), me:null, mess
 const dataListeners = new Set();
 const cellKey = r => r[0] + '|' + r[2] + '|' + (r[3] || '') + '|' + r[1];        // 選手ID|項目ID|側|測定日
 function rowsArray(){ const out = []; DATA.cells.forEach((v, k) => { const a = k.split('|'); out.push([a[0], a[3], a[1], a[2], v]); }); return out; }
-function saveData(){ store.set('data', { v:2, who:(conn().user || {}).id, players:DATA.players, items:DATA.items, rows:rowsArray(), me:DATA.me, messages:DATA.messages,
+function saveData(){ if (store.kind === 'name') return;      // 仮の置き場には、大きな控えは置かない
+  store.set('data', { v:2, who:(conn().user || {}).id, players:DATA.players, items:DATA.items, rows:rowsArray(), me:DATA.me, messages:DATA.messages,
   stamp:DATA.stamp, epoch:DATA.epoch, itRev:DATA.itRev, mRev:DATA.mRev }); }
 (function loadData(){
   const c = store.get('data'), u = conn().user || {};
