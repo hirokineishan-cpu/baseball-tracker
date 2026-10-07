@@ -1,4 +1,4 @@
-import { schoolGrade, monthsOld, DERIVED } from './mod-physical.js?v=202610071546';
+import { schoolGrade, monthsOld, DERIVED } from './mod-physical.js?v=202610071658';
 
 /* 解析（管理・スタッフだけ。選手には出さない。全員分のデータは、サーバーが選手には返さない）
    2つの項目の関係（相関）を、選手1人を1つの点として見る。

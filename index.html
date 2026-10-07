@@ -107,12 +107,12 @@ const CFG = {
 /* ---- 項目（機能）を足すときは、この2つの表に足す ----
    1) 部品の一覧：タブの名前と、部品のファイル */
 const PARTS = {
-  physical: { label:'計測',           file:'./mod-physical.js?v=202610071546' },
-  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610071546' },
-  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610071546' },
-  admin:    { label:'管理',           file:'./mod-admin.js?v=202610071546' },
-  news:     { label:'お知らせ',       file:'./mod-news.js?v=202610071546' },
-  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610071546' }
+  physical: { label:'計測',           file:'./mod-physical.js?v=202610071658' },
+  analysis: { label:'解析',           file:'./mod-analysis.js?v=202610071658' },
+  message:  { label:'メッセージ配信', short:'配信', file:'./mod-message.js?v=202610071658' },
+  admin:    { label:'管理',           file:'./mod-admin.js?v=202610071658' },
+  news:     { label:'お知らせ',       file:'./mod-news.js?v=202610071658' },
+  me:       { label:'マイページ',     short:'マイ', file:'./mod-me.js?v=202610071658' }
 };
 /* 2) 立場ごとに出すタブ（左から順）。guest＝まだログインしていない */
 const TABS = {
@@ -253,7 +253,8 @@ function refresh(full){
   if (inflight) return inflight;
   if (!conn().token || modeNow() === 'guest') return Promise.resolve(null);
   const isPlayer = CORE.role() === '選手';
-  const ask = (isPlayer || full || !DATA.ready) ? {} : { since:DATA.stamp, epoch:DATA.epoch, itRev:DATA.itRev, mRev:DATA.mRev };
+  /* 手元に記録が1件も無いときは、「変わった分だけ」ではなく全部を取りに行く（控えが空のまま残っていても、自分で直る） */
+  const ask = (isPlayer || full || !DATA.ready || !DATA.cells.size) ? {} : { since:DATA.stamp, epoch:DATA.epoch, itRev:DATA.itRev, mRev:DATA.mRev };
   inflight = (async () => {
     let j = null;
     try { DATA.calls++; j = await api('sync', ask); } catch (e) { DATA.error = String(e.message || e); return null; }
