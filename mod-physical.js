@@ -365,6 +365,7 @@ export function mount(ROOT, CORE) {
     </div>
     ${conflictCard()}
     ${itemNote(it)}
+    ${selClass === LEFT ? '<p class="note" id="ph-leftnote">退会者の記録を保管用のシートに移してある場合、ここには出ません（管理の「選手名簿」で在籍に戻すと、記録も戻ります）。</p>' : ''}
     <p class="note">数字を消して保存すると、その記録を消します。未保存の入力は、日付や種目を切り替えても、画面を閉じても残ります。ほかの人の入力は、自動で届きます。</p>
     <div class="card"><div class="tw"><table id="ph-intable">
       <tr><th>選手（${list.length}人）</th>${head}<th class="hide-s">前回</th></tr>${rows || `<tr><td colspan="${ss.length + 2}" class="muted">選手がいません（管理の「選手名簿」で登録してください）</td></tr>`}
@@ -532,10 +533,10 @@ export function mount(ROOT, CORE) {
       const k = [c['選手ID'], c['項目ID'], c['側'], c['測定日']].join('|');
       conflicts = conflicts.filter(x => x !== c);
       if (ck) { delete draft[k]; delete base[k]; keepDraft(); render(); return; }
-      await save([k], true); return;
+      save([k], true); return;
     }
     if (e.target.id === 'ph-print') { window.print(); return; }
-    if (e.target.id === 'ph-save') { if (!SELF) await save(); return; }
+    if (e.target.id === 'ph-save') { if (!SELF) save(); return; }
   });
   ROOT.addEventListener('change', e => {
     const t = e.target;
@@ -556,46 +557,75 @@ export function mount(ROOT, CORE) {
     if (s) s.disabled = !n; if (c) c.disabled = !n; if (l) l.textContent = n ? '未保存 ' + n + '件' : '';
   });
 
-  /* 保存：変えたマスだけを送る。keys を渡すと、そのマスだけ。force は「自分の値にする」を選んだとき */
-  async function save(keys, force) {
-    if (busy) return;
-    const rows = [], sent = []; let bad = 0;
+  /* 保存：変えたマスだけを送る。keys を渡すと、そのマスだけ。force は「自分の値にする」を選んだとき。
+     押したらすぐ画面に反映し、通信は裏で済ませる（待たせない）。うまくいかなかったマスは、未保存に戻して知らせる。
+     送っている途中の分は端末に控えておき、途中で閉じても、次に開いたとき未保存として戻る。 */
+  let chain = Promise.resolve(), sending = 0;
+  const cellOf = (k, v) => { const a = k.split('|'); return [a[0], a[3], a[1], a[2], v]; };
+  function pendSet(add, del) {
+    const p = store.get('ph-pending') || { draft: {}, base: {} };
+    (del || []).forEach(k => { delete p.draft[k]; delete p.base[k]; });
+    Object.keys(add || {}).forEach(k => { p.draft[k] = add[k].v; p.base[k] = add[k].b; });
+    if (Object.keys(p.draft).length) store.set('ph-pending', p); else store.del('ph-pending');
+  }
+  (function recover() {                      // 前に送りかけで閉じた分があれば、未保存に戻す
+    if (SELF) return; const p = store.get('ph-pending'); if (!p || !p.draft) return;
+    Object.keys(p.draft).forEach(k => { if (!(k in draft)) { draft[k] = p.draft[k]; base[k] = p.base[k] != null ? p.base[k] : ''; } });
+    store.del('ph-pending'); keepDraft();
+  })();
+  const show = () => { pull(); if (typing()) { pending = true; if (msg) CORE.toast(msg); } else render(); };
+  function save(keys, force) {
+    const rows = [], sent = [], snap = {}; let bad = 0;
     (keys || Object.keys(draft)).forEach(k => {
       if (!(k in draft)) return;
       const [pid, iid, sd, d] = k.split('|'), raw = draft[k];
       if (raw !== '' && !isFinite(Number(raw))) { bad++; return; }
       const o = { '選手ID': pid, '測定日': d, '項目ID': iid, '側': sd, '値': raw === '' ? '' : Number(raw), '元': base[k] != null ? base[k] : '' };
       if (force) o['上書き'] = 1;
-      rows.push(o); sent.push(k);
+      rows.push(o); sent.push(k); snap[k] = { v: raw, b: base[k] != null ? base[k] : '' };
     });
-    if (bad) { msg = '数字として読めない入力が ' + bad + '件あります。直してから保存してください'; msgOk = false; render(); return; }
-    if (!rows.length) { render(); return; }
-    const btn = $('#ph-save'); if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
-    busy = true;
+    if (bad) { msg = '数字として読めない入力が ' + bad + '件あります。直してから保存してください'; msgOk = false; render(); return Promise.resolve(); }
+    if (!rows.length) { render(); return Promise.resolve(); }
+    sent.forEach(k => { delete draft[k]; delete base[k]; });
+    pendSet(snap); keepDraft();
+    if (!keys) conflicts = [];
+    sending++; msg = '保存しています…（' + rows.length + '件）'; msgOk = true;
+    CORE.data.put(sent.map(k => cellOf(k, snap[k].v)));       // すぐ画面に反映する
+    show();
+    chain = chain.then(() => send(rows, sent, snap));
+    return chain;
+  }
+  async function send(rows, sent, snap) {
     try {
       const j = await api('upsertMeasures', { rows });
       if (!j.ok) throw new Error(j.error || '保存できませんでした');
       const cf = j.conflicts || [], cfKey = {};
       cf.forEach(c => { cfKey[[c['選手ID'], c['項目ID'], c['側'], c['測定日']].join('|')] = c; });
-      const done = [], seen = [];
+      const cells = [];
       sent.forEach(k => {
-        const a = k.split('|');
-        if (cfKey[k]) { seen.push([a[0], a[3], a[1], a[2], cfKey[k]['今の値']]); return; }       // ぶつかったマスは、未保存のまま残す
-        done.push([a[0], a[3], a[1], a[2], draft[k]]); delete draft[k]; delete base[k];
+        if (cfKey[k]) { if (!(k in draft)) { draft[k] = snap[k].v; base[k] = snap[k].b; } cells.push(cellOf(k, cfKey[k]['今の値'])); }   // ぶつかったマスは、未保存に戻す
+        else if (!(k in draft)) cells.push(cellOf(k, snap[k].v));
       });
-      if (!keys) conflicts = cf; else conflicts = conflicts.concat(cf);
-      keepDraft(); busy = false;
+      conflicts = conflicts.filter(c => !sent.some(k => k === [c['選手ID'], c['項目ID'], c['側'], c['測定日']].join('|'))).concat(cf);
       const bits = [`追加${j.added || 0}`, `更新${j.updated || 0}`];
       if (j.removed) bits.push('削除' + j.removed);
       if (j.skipped) bits.push('受け付けなかったもの' + j.skipped);
       msg = cf.length ? `ほかの人の入力と重なったマスが ${cf.length}件あります。下で、どちらを残すか選んでください（ほかは保存しました：${bits.join('・')}）`
                       : `保存しました（${bits.join('・')}）`;
       msgOk = !j.skipped && !cf.length;
-      CORE.data.put(done.concat(seen));          // 手元にすぐ反映（このあと、変わった分をサーバーに確かめる）
-      pull(); render();
+      sending--; pendSet(null, sent); keepDraft();
+      CORE.data.put(cells);
+      show();
       CORE.data.refresh(false);
-      setTimeout(() => { if (msgOk) { msg = ''; msgOk = false; const m = $('#ph-msg'); if (m) m.remove(); } }, 5000);
-    } catch (e) { msg = String(e.message || e) + '（入力は残っています。電波の届くところで、もう一度「保存」を押してください）'; msgOk = false; busy = false; render(); }
+      setTimeout(() => { if (msgOk && !sending) { msg = ''; msgOk = false; const m = $('#ph-msg'); if (m) m.remove(); } }, 5000);
+    } catch (e) {
+      /* 届かなかった：画面を元の値に戻し、入力は未保存に戻す */
+      sent.forEach(k => { if (!(k in draft)) { draft[k] = snap[k].v; base[k] = snap[k].b; } });
+      sending--; pendSet(null, sent); keepDraft();
+      CORE.data.put(sent.map(k => cellOf(k, snap[k].b)));
+      msg = '保存できませんでした：' + String(e.message || e) + '（入力は未保存として残っています。電波の届くところで、もう一度「保存」を押してください）'; msgOk = false;
+      show();
+    }
   }
 
   /* タブを開き直したとき、1分以上たっていれば「変わった分」を確かめる */

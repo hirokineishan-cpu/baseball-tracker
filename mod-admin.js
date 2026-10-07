@@ -1,4 +1,4 @@
-import { schoolGrade, monthsOld } from './mod-physical.js?v=202610071528';
+import { schoolGrade, monthsOld } from './mod-physical.js?v=202610071546';
 
 /* 管理（管理者だけ）
    ・ユーザー：追加、立場の変更、選手との結び付け、停止、パスワードの入れ直し
@@ -88,6 +88,7 @@ export function mount(ROOT, CORE) {
   const sel = new Set();
   let bulk = { field: 'クラス', step: '', busy: false };
   let itemsAt = 0, loadedAt = 0;
+  let arc = { info: null, step: '', busy: false, text: '', err: '' };
   const D = CORE.data.state;
   const myId = () => String((CORE.conn().user || {}).id || '');
 
@@ -319,7 +320,8 @@ export function mount(ROOT, CORE) {
     bulk.busy = true; render();
     try {
       const j = await call('patchPlayers', { ids: [...sel], set: bulk.set });
-      toast(j.updated + '人を変えました' + (j.missing ? '（見つからなかった人 ' + j.missing + '人）' : ''));
+      toast(j.updated + '人を変えました' + (j.missing ? '（見つからなかった人 ' + j.missing + '人）' : '') + (j.restored ? '（保管から戻した記録 ' + j.restored + '件）' : ''));
+      arc.info = null; if (j.restored) await CORE.data.refresh(true);
       sel.clear(); bulk = { field: bulk.field, step: '', busy: false };
       await load();
     } catch (e) { bulk = { field: bulk.field, step: '', busy: false, err: String(e.message || e) }; render(); }
@@ -345,6 +347,7 @@ export function mount(ROOT, CORE) {
         <div id="ad-rl">${listHtml()}</div>
       </div>
       <div id="ad-bulkbox">${bulkHtml()}</div>
+      <div id="ad-arcbox">${arcHtml()}</div>
       <div class="card" id="ad-impbox">
         <div class="head"><h3>ファイルから取り込む（旧システムからの引き継ぎ用）</h3></div>
         <p class="note">「引き継ぎデータ.json」を選ぶと、選手と記録をまとめて取り込みます。すでにある選手・記録は増えません。こちらで直した内容は、取り込み直しても上書きされません。</p>
@@ -355,7 +358,34 @@ export function mount(ROOT, CORE) {
         ${imp.step !== 'run' && imp.text ? `<p class="note" id="ad-impres" style="color:var(--ink)">${esc(imp.text)}</p>` : ''}
       </div>`;
   }
-  const redrawList = () => { const el = ROOT.querySelector('#ad-rl'); if (el) el.innerHTML = listHtml(); const b = ROOT.querySelector('#ad-bulkbox'); if (b) b.innerHTML = bulkHtml(); };
+  const redrawList = () => { const el = ROOT.querySelector('#ad-rl'); if (el) el.innerHTML = listHtml(); const b = ROOT.querySelector('#ad-bulkbox'); if (b) b.innerHTML = bulkHtml(); const a = ROOT.querySelector('#ad-arcbox'); if (a) a.innerHTML = arcHtml(); };
+  /* 退会者の記録を、保管用のシートへ移す（「クラス」で退会者を選んだときに出す） */
+  function arcHtml() {
+    if (flt.cls !== F_LEFT) return '';
+    const i = arc.info;
+    return `<div class="card" id="ad-arc"><div class="head"><h3>退会者の記録を保管する</h3></div>
+      <p class="note">退会者の記録を、同じスプレッドシートの中の「計測_保管」シートへ移します。消すのではなく、置き場所を変えるだけです。ふだんの読み書きから外れるので、記録が増えても遅くなりにくくなります。退会者を在籍や休会に戻すと、その選手の記録は自動で戻ります。</p>
+      ${arc.err ? `<div class="msg" id="ad-arcerr">${esc(arc.err)}</div>` : ''}
+      ${!i ? '<p class="note" id="ad-arcload">数えています…</p>' :
+        `<p class="note" id="ad-arcstat" style="color:var(--ink)">退会者 <b>${i.leftPlayers}</b>人 ／ いま移せる記録 <b id="ad-arcn">${i.movable}</b>件 ／ 保管ずみ <b id="ad-arcd">${i.archived}</b>件 ／ ふだん使う記録 ${i.total}件</p>
+         ${arc.step === 'ask' ? `<p class="note" id="ad-arcask" style="color:var(--ink); font-size:14px"><b>${i.movable}件</b>を保管用のシートへ移します。移したあと、退会者の記録は画面（計測・解析）に出なくなります。よろしいですか。</p>
+            <div style="display:flex; gap:8px; margin-top:8px"><button class="b primary" id="ad-arcgo" ${arc.busy ? 'disabled' : ''}>${arc.busy ? '移しています…' : '移す'}</button><button class="b" id="ad-arcno" ${arc.busy ? 'disabled' : ''}>やめる</button></div>` :
+           `<button class="b" id="ad-arcnext" style="margin-top:8px" ${i.movable ? '' : 'disabled'}>退会者の記録を保管用のシートへ移す</button>`}
+         ${arc.text ? `<p class="note" id="ad-arcres" style="color:var(--ink)">${esc(arc.text)}</p>` : ''}`}</div>`;
+  }
+  async function loadArc() {
+    try { arc.info = await call('archiveInfo'); arc.err = ''; } catch (e) { arc.err = String(e.message || e); arc.info = arc.info || null; }
+    redrawList();
+  }
+  async function runArc() {
+    arc.busy = true; redrawList();
+    try {
+      const j = await call('archiveLeft');
+      arc = { info: j, step: '', busy: false, text: j.moved + '件を保管用のシートへ移しました。', err: '' };
+      await CORE.data.refresh(true);
+    } catch (e) { arc.busy = false; arc.step = ''; arc.err = String(e.message || e); }
+    redrawList();
+  }
   /* ---- 引き継ぎデータの取り込み。ふだんの保存と同じ道（upsertMaster・upsertMeasures）を、小分けにして通す ---- */
   function readImport(file) {
     const fr = new FileReader();
@@ -496,6 +526,9 @@ export function mount(ROOT, CORE) {
     if (seg) { page = seg.dataset.page; store.set('admin-page', page); render();
       if (page === 'items' && !itemsAt && !loading) loadItems().then(render, er => { loadErr = String(er.message || er); render(); });
       return; }
+    if (t.id === 'ad-arcnext') { arc.step = 'ask'; arc.text = ''; redrawList(); return; }
+    if (t.id === 'ad-arcno') { arc.step = ''; redrawList(); return; }
+    if (t.id === 'ad-arcgo') { if (!arc.busy) runArc(); return; }
     if (t.id === 'ad-bclear') { sel.clear(); bulk.step = ''; redrawList(); return; }
     if (t.id === 'ad-bno') { bulk.step = ''; redrawList(); return; }
     if (t.id === 'ad-bnext') { try { const pl = bulkPlan(); bulk = { field: bulk.field, step: 'ask', set: pl.set, text: pl.text, busy: false }; } catch (er) { bulk.err = String(er.message || er); } redrawList(); return; }
@@ -522,7 +555,7 @@ export function mount(ROOT, CORE) {
   });
   ROOT.addEventListener('change', async e => {
     const t = e.target;
-    if (t.id === 'ad-fcls') { flt.cls = t.value; redrawList(); return; }
+    if (t.id === 'ad-fcls') { flt.cls = t.value; arc.step = ''; arc.text = ''; redrawList(); if (flt.cls === F_LEFT) loadArc(); return; }
     if (t.id === 'ad-fgrade') { flt.grade = t.value; redrawList(); return; }
     if (t.id === 'ad-fsort') { flt.sort = t.value; redrawList(); return; }
     if (t.id === 'ad-fnomail') { flt.noMail = t.checked; redrawList(); return; }
