@@ -169,6 +169,7 @@ export function mount(ROOT, CORE) {
       try {
         const j = await api('resetPassword', { rt: CORE.resetToken, newPassword: pw });
         if (!j.ok) throw new Error(j.error || '決められませんでした');
+        store.wipe();                                   // パスワードを決めた人の端末として扱う（前の人のログインや控えが残っていれば、ここで消す）
         if (j.token) { enter(j); return; }
         view = 'resetend'; okMsg = 'パスワードを決めました'; msg = j.note || '';
       } catch (er) { msg = String(er.message || er); }
